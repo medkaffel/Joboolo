@@ -7,15 +7,17 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import {
   MapPin, Building, Clock, Euro, Heart, Share2, Link as LinkIcon,
-  Linkedin, Twitter, Mail, ChevronRight, CheckCircle2, Gift, ArrowLeft
+  Linkedin, Twitter, Mail, ChevronRight, CheckCircle2, Gift, ArrowLeft, Sparkles
 } from 'lucide-react';
 import { jobService } from '../services/jobService';
 import { applicationService } from '../services/applicationService';
 import { savedJobService } from '../services/savedJobService';
+import { aiService } from '../services/aiService';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../hooks/use-toast';
 import AuthModal from '../components/AuthModal';
 import ApplyModal from '../components/ApplyModal';
+import MatchDialog from '../components/MatchDialog';
 
 const EMPLOYMENT_TYPE = {
   CDI: 'FULL_TIME', CDD: 'TEMPORARY', Stage: 'INTERN',
@@ -128,6 +130,28 @@ const JobDetail = () => {
   const [savingJob, setSavingJob] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showApplyModal, setShowApplyModal] = useState(false);
+  const [matchOpen, setMatchOpen] = useState(false);
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [matchResult, setMatchResult] = useState(null);
+
+  const handleAnalyze = async () => {
+    if (!isAuthenticated) { setShowAuthModal(true); return; }
+    if (!isCandidate) {
+      toast({ title: 'Réservé aux candidats', description: 'Connectez-vous avec un compte candidat.', variant: 'destructive' });
+      return;
+    }
+    setMatchResult(null);
+    setMatchOpen(true);
+    setMatchLoading(true);
+    try {
+      setMatchResult(await aiService.matchJob(job.id));
+    } catch (e) {
+      toast({ title: 'Erreur', description: e.response?.data?.detail || e.message, variant: 'destructive' });
+      setMatchOpen(false);
+    } finally {
+      setMatchLoading(false);
+    }
+  };
 
   useJobSeo(job);
 
@@ -359,6 +383,16 @@ const JobDetail = () => {
                   <Heart className={`h-4 w-4 mr-2 ${isSaved ? 'fill-current' : ''}`} />
                   {isSaved ? 'Sauvegardée' : 'Sauvegarder'}
                 </Button>
+                {!job.is_partner && (
+                  <Button
+                    variant="outline"
+                    className="w-full border-brand/30 text-brand hover:bg-brand-50"
+                    onClick={handleAnalyze}
+                    data-testid="job-detail-analyze-btn"
+                  >
+                    <Sparkles className="h-4 w-4 mr-2" />Analyser ma compatibilité (IA)
+                  </Button>
+                )}
 
                 <div className="pt-4 border-t">
                   <p className="flex items-center text-sm font-medium text-gray-700 mb-3">
@@ -396,6 +430,7 @@ const JobDetail = () => {
       <Footer />
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />
       <ApplyModal isOpen={showApplyModal} onClose={() => setShowApplyModal(false)} job={job} />
+      <MatchDialog open={matchOpen} onOpenChange={setMatchOpen} loading={matchLoading} result={matchResult} title="Ma compatibilité avec l'offre" />
     </div>
   );
 };

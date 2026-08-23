@@ -25,6 +25,7 @@ async def populate_application_response(app_doc: dict, db, include_candidate: bo
     job_info = {
         "id": job.get("_id", ""),
         "title": job.get("title", "Job not found"),
+        "employer_id": job.get("employer_id", ""),
         "company": {
             "name": company.get("name", "Company"),
             "location": company.get("location", "")

@@ -2,13 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { applicationService } from '../services/applicationService';
+import { aiService } from '../services/aiService';
 import { useToast } from '../hooks/use-toast';
 import Header from '../components/Header';
 import Footer from '../components/Footer';
+import MatchDialog from '../components/MatchDialog';
 import { Card, CardContent } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
-import { Briefcase, MapPin, Building } from 'lucide-react';
+import { Briefcase, MapPin, Building, MessageSquare, Sparkles } from 'lucide-react';
 
 const statusMap = {
   pending: { label: 'En attente', color: 'bg-yellow-100 text-yellow-800' },
@@ -23,6 +25,23 @@ const MyApplications = () => {
   const navigate = useNavigate();
   const [applications, setApplications] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [matchOpen, setMatchOpen] = useState(false);
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [matchResult, setMatchResult] = useState(null);
+
+  const analyzeMatch = async (jobId) => {
+    setMatchResult(null);
+    setMatchOpen(true);
+    setMatchLoading(true);
+    try {
+      setMatchResult(await aiService.matchJob(jobId));
+    } catch (e) {
+      toast({ title: 'Erreur', description: e.response?.data?.detail || e.message, variant: 'destructive' });
+      setMatchOpen(false);
+    } finally {
+      setMatchLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (isAuthenticated && isCandidate) {
@@ -73,7 +92,7 @@ const MyApplications = () => {
               const st = statusMap[app.status] || statusMap.pending;
               return (
                 <Card key={app.id} data-testid={`application-item-${app.id}`}>
-                  <CardContent className="flex items-center justify-between p-5">
+                  <CardContent className="flex items-center justify-between p-5 gap-4 flex-wrap">
                     <div>
                       <h3 className="font-semibold text-slate-900">{app.job?.title}</h3>
                       <div className="flex items-center text-sm text-slate-500 mt-1">
@@ -86,7 +105,17 @@ const MyApplications = () => {
                         Envoyée le {new Date(app.created_at).toLocaleDateString('fr-FR')}
                       </p>
                     </div>
-                    <Badge className={st.color}>{st.label}</Badge>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Button variant="outline" size="sm" onClick={() => analyzeMatch(app.job?.id)} data-testid={`app-match-btn-${app.id}`}>
+                        <Sparkles className="h-4 w-4 mr-1 text-brand" />Ma compatibilité
+                      </Button>
+                      {app.job?.employer_id && (
+                        <Button variant="outline" size="sm" onClick={() => navigate(`/messages?to=${app.job.employer_id}`)} data-testid={`app-contact-btn-${app.id}`}>
+                          <MessageSquare className="h-4 w-4 mr-1" />Contacter
+                        </Button>
+                      )}
+                      <Badge className={st.color}>{st.label}</Badge>
+                    </div>
                   </CardContent>
                 </Card>
               );
@@ -94,6 +123,7 @@ const MyApplications = () => {
           </div>
         )}
       </div>
+      <MatchDialog open={matchOpen} onOpenChange={setMatchOpen} loading={matchLoading} result={matchResult} title="Ma compatibilité avec l'offre" />
       <Footer />
     </div>
   );

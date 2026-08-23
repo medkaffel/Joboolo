@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Button } from './ui/button';
-import { Menu, User, FileText, Heart, Briefcase, Plus, LogOut, ChevronDown, Bell, History, Mail } from 'lucide-react';
+import { Menu, User, FileText, Heart, Briefcase, Plus, LogOut, ChevronDown, Bell, History, Mail, Sparkles, MessageSquare, BarChart3 } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -9,6 +9,7 @@ import {
   DropdownMenuSeparator,
 } from './ui/dropdown-menu';
 import { useAuth } from '../contexts/AuthContext';
+import { messageService } from '../services/messageService';
 import AuthModal from './AuthModal';
 import { useNavigate } from 'react-router-dom';
 
@@ -24,6 +25,16 @@ const Header = () => {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const { user, logout, isAuthenticated, isEmployer, isCandidate } = useAuth();
   const navigate = useNavigate();
+  const [unread, setUnread] = useState(0);
+
+  useEffect(() => {
+    if (!isAuthenticated) { setUnread(0); return; }
+    let active = true;
+    const poll = () => messageService.unreadCount().then((n) => { if (active) setUnread(n); });
+    poll();
+    const t = setInterval(poll, 15000);
+    return () => { active = false; clearInterval(t); };
+  }, [isAuthenticated]);
 
   // Filtrage des liens du menu principal selon le rôle :
   // - Candidat  : uniquement « Rechercher des emplois »
@@ -90,6 +101,22 @@ const Header = () => {
                 </button>
               )}
 
+              {isAuthenticated && (
+                <button
+                  onClick={() => navigate('/messages')}
+                  className="relative flex items-center justify-center h-9 w-9 rounded-full hover:bg-slate-100 transition-colors"
+                  title="Messagerie"
+                  data-testid="nav-messages-btn"
+                >
+                  <MessageSquare className="h-5 w-5 text-slate-600" />
+                  {unread > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 bg-brand text-white text-[10px] rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center" data-testid="header-unread-badge">
+                      {unread > 9 ? '9+' : unread}
+                    </span>
+                  )}
+                </button>
+              )}
+
               {isAuthenticated ? (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -107,6 +134,12 @@ const Header = () => {
                     </DropdownMenuItem>
                     {user?.user_type === 'candidate' && (
                       <>
+                        <DropdownMenuItem onClick={() => navigate('/recommendations')} className="cursor-pointer" data-testid="menu-recommendations">
+                          <Sparkles className="h-4 w-4 mr-2" />Recommandations IA
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => navigate('/messages')} className="cursor-pointer" data-testid="menu-messages">
+                          <MessageSquare className="h-4 w-4 mr-2" />Messagerie
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => navigate('/my-applications')} className="cursor-pointer" data-testid="menu-applications">
                           <FileText className="h-4 w-4 mr-2" />Mes candidatures
                         </DropdownMenuItem>
@@ -130,6 +163,12 @@ const Header = () => {
                     {isEmployer && (
                       <>
                         <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => navigate('/recruiter-analytics')} className="cursor-pointer" data-testid="menu-analytics">
+                          <BarChart3 className="h-4 w-4 mr-2" />Statistiques
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => navigate('/messages')} className="cursor-pointer" data-testid="menu-employer-messages">
+                          <MessageSquare className="h-4 w-4 mr-2" />Messagerie
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => navigate('/my-jobs')} className="cursor-pointer" data-testid="menu-my-jobs">
                           <Briefcase className="h-4 w-4 mr-2" />Mes offres
                         </DropdownMenuItem>

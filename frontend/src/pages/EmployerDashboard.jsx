@@ -5,7 +5,7 @@ import Header from '../components/Header';
 import Footer from '../components/Footer';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
-import { Briefcase, Plus, LayoutList } from 'lucide-react';
+import { Briefcase, Plus, LayoutList, BarChart3, MessageSquare } from 'lucide-react';
 
 const EmployerDashboard = () => {
   const { isAuthenticated, isEmployer, user } = useAuth();
@@ -51,6 +51,26 @@ const EmployerDashboard = () => {
             <CardContent>
               <p className="text-slate-500 mb-4">Consultez et gérez vos annonces publiées.</p>
               <Button variant="outline"><Briefcase className="h-4 w-4 mr-2" />Voir mes offres</Button>
+            </CardContent>
+          </Card>
+
+          <Card className="hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/recruiter-analytics')} data-testid="dashboard-analytics-card">
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2"><BarChart3 className="h-5 w-5 text-brand" /><span>Statistiques</span></CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-slate-500 mb-4">Suivez les vues et candidatures de vos offres.</p>
+              <Button variant="outline"><BarChart3 className="h-4 w-4 mr-2" />Voir les stats</Button>
+            </CardContent>
+          </Card>
+
+          <Card className="hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/messages')} data-testid="dashboard-messages-card">
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2"><MessageSquare className="h-5 w-5 text-brand" /><span>Messagerie</span></CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-slate-500 mb-4">Échangez directement avec vos candidats.</p>
+              <Button variant="outline"><MessageSquare className="h-4 w-4 mr-2" />Ouvrir la messagerie</Button>
             </CardContent>
           </Card>
         </div>

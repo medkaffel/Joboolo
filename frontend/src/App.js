@@ -21,6 +21,9 @@ import RecruiterLanding from "./pages/RecruiterLanding";
 import PartnerDashboard from "./pages/PartnerDashboard";
 import PaymentSuccess from "./pages/PaymentSuccess";
 import PaymentCancel from "./pages/PaymentCancel";
+import Recommendations from "./pages/Recommendations";
+import Messages from "./pages/Messages";
+import RecruiterAnalytics from "./pages/RecruiterAnalytics";
 import { Toaster } from "./components/ui/toaster";
 
 function AppRoutes() {
@@ -49,6 +52,9 @@ function AppRoutes() {
       <Route path="/partenaire" element={<PartnerDashboard />} />
       <Route path="/payment/success" element={<PaymentSuccess />} />
       <Route path="/payment/cancel" element={<PaymentCancel />} />
+      <Route path="/recommendations" element={<Recommendations />} />
+      <Route path="/messages" element={<Messages />} />
+      <Route path="/recruiter-analytics" element={<RecruiterAnalytics />} />
     </Routes>
   );
 }

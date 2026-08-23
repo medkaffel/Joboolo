@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="16" skipped="0" tests="21" time="3.433" timestamp="2026-08-23T09:47:16.150851+00:00" hostname="agent-env-60f62afc-29f6-4732-8eb2-ea7db20e0941"><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIRecommendations" name="test_recommendations_candidate" time="0.662"><failure message="AssertionError: {&quot;detail&quot;:&quot;Could not validate credentials&quot;}&#10;assert 401 == 200&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:73: in test_recommendations_candidate
+    assert r.status_code == 200, r.text[:500]
+E   AssertionError: {"detail":"Could not validate credentials"}
+E   assert 401 == 200
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestMessaging" name="test_can_contact_allowed" time="1.230"><failure message="assert 401 == 200&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:162: in test_can_contact_allowed
+    assert r.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIRecommendations" name="test_recommendations_forbidden_for_employer" time="0.654"><failure message="AssertionError: {&quot;detail&quot;:&quot;Could not validate credentials&quot;}&#10;assert 401 == 403&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:87: in test_recommendations_forbidden_for_employer
+    assert r.status_code == 403, r.text[:300]
+E   AssertionError: {"detail":"Could not validate credentials"}
+E   assert 401 == 403
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestMessaging" name="test_candidate_sends_and_employer_reads" time="0.101"><failure message="assert 401 == 200&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:172: in test_candidate_sends_and_employer_reads
+    assert u0.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIRecommendations" name="test_recommendations_requires_auth" time="0.098" /><testcase classname="tests.test_lot6_ai_messaging_analytics.TestMessaging" name="test_empty_message_rejected" time="0.142"><failure message="assert 401 == 400&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:219: in test_empty_message_rejected
+    assert r.status_code == 400
+E   assert 401 == 400
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIMatchJob" name="test_match_job" time="0.385"><failure message="AssertionError: {&quot;detail&quot;:&quot;Could not validate credentials&quot;}&#10;assert 401 == 200&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:105: in test_match_job
+    assert r.status_code == 200, r.text[:500]
+E   AssertionError: {"detail":"Could not validate credentials"}
+E   assert 401 == 200
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestMessaging" name="test_unrelated_user_forbidden" time="0.427"><failure message="AssertionError: {&quot;detail&quot;:&quot;Could not validate credentials&quot;}&#10;assert 401 == 403&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:224: in test_unrelated_user_forbidden
+    assert r.status_code == 403, r.text[:300]
+E   AssertionError: {"detail":"Could not validate credentials"}
+E   assert 401 == 403
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIMatchJob" name="test_match_job_404" time="0.104"><failure message="assert 401 == 404&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:114: in test_match_job_404
+    assert r.status_code == 404
+E   assert 401 == 404
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestMessaging" name="test_self_message_forbidden" time="0.128"><failure message="assert 401 == 403&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:229: in test_self_message_forbidden
+    assert r.status_code == 403
+E   assert 401 == 403
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIMatchJob" name="test_match_job_forbidden_for_employer" time="0.194"><failure message="assert 401 == 403&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:118: in test_match_job_forbidden_for_employer
+    assert r.status_code == 403
+E   assert 401 == 403
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestMessaging" name="test_nonexistent_recipient" time="0.144"><failure message="assert 401 == 403&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:234: in test_nonexistent_recipient
+    assert r.status_code == 403
+E   assert 401 == 403
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIMatchApplication" name="test_match_application" time="0.136"><failure message="AssertionError: {&quot;detail&quot;:&quot;Job not found&quot;}&#10;assert 404 == 200&#10; +  where 404 = &lt;Response [404]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:125: in test_match_application
+    assert jr.status_code == 200, jr.text[:300]
+E   AssertionError: {"detail":"Job not found"}
+E   assert 404 == 200
+E    +  where 404 = &lt;Response [404]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestMessaging" name="test_messages_require_auth" time="0.132" /><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIMatchApplication" name="test_match_application_forbidden_for_candidate" time="0.129"><failure message="assert 401 == 403&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:150: in test_match_application_forbidden_for_candidate
+    assert r.status_code == 403
+E   assert 401 == 403
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestRecruiterAnalytics" name="test_analytics" time="0.139"><failure message="AssertionError: {&quot;detail&quot;:&quot;Could not validate credentials&quot;}&#10;assert 401 == 200&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:245: in test_analytics
+    assert r.status_code == 200, r.text[:500]
+E   AssertionError: {"detail":"Could not validate credentials"}
+E   assert 401 == 200
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAIMatchApplication" name="test_match_application_404" time="0.138"><failure message="assert 401 == 404&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:154: in test_match_application_404
+    assert r.status_code == 404
+E   assert 401 == 404
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestRecruiterAnalytics" name="test_analytics_forbidden_for_candidate" time="0.096"><failure message="assert 401 == 403&#10; +  where 401 = &lt;Response [401]&gt;.status_code">tests/test_lot6_ai_messaging_analytics.py:266: in test_analytics_forbidden_for_candidate
+    assert r.status_code == 403
+E   assert 401 == 403
+E    +  where 401 = &lt;Response [401]&gt;.status_code</failure></testcase><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAuthSmoke" name="test_candidate_login" time="0.000" /><testcase classname="tests.test_lot6_ai_messaging_analytics.TestAuthSmoke" name="test_employer_login" time="0.000" /><testcase classname="tests.test_lot6_ai_messaging_analytics.TestRecruiterAnalytics" name="test_analytics_requires_auth" time="0.093" /></testsuite></testsuites>

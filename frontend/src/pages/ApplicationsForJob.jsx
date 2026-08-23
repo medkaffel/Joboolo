@@ -4,14 +4,16 @@ import { useAuth } from '../contexts/AuthContext';
 import { applicationService } from '../services/applicationService';
 import { jobService } from '../services/jobService';
 import { fileService } from '../services/fileService';
+import { aiService } from '../services/aiService';
 import { useToast } from '../hooks/use-toast';
 import Header from '../components/Header';
 import Footer from '../components/Footer';
+import MatchDialog from '../components/MatchDialog';
 import { Card, CardContent } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { ArrowLeft, Download, Mail, User, FileText } from 'lucide-react';
+import { ArrowLeft, Download, Mail, User, FileText, Sparkles, MessageSquare } from 'lucide-react';
 
 const STATUS = {
   pending: { label: 'En attente', color: 'bg-yellow-100 text-yellow-800' },
@@ -28,6 +30,25 @@ const ApplicationsForJob = () => {
   const [apps, setApps] = useState([]);
   const [job, setJob] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [matchOpen, setMatchOpen] = useState(false);
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [matchResult, setMatchResult] = useState(null);
+  const [matchName, setMatchName] = useState('');
+
+  const analyzeApplicant = async (app) => {
+    setMatchResult(null);
+    setMatchName(`${app.candidate?.first_name || ''} ${app.candidate?.last_name || ''}`.trim());
+    setMatchOpen(true);
+    setMatchLoading(true);
+    try {
+      setMatchResult(await aiService.matchApplication(app.id));
+    } catch (e) {
+      toast({ title: 'Erreur', description: e.response?.data?.detail || e.message, variant: 'destructive' });
+      setMatchOpen(false);
+    } finally {
+      setMatchLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (isAuthenticated && isEmployer) {
@@ -108,7 +129,15 @@ const ApplicationsForJob = () => {
                         </a>
                         {c.location && <p className="text-xs text-slate-400 mt-1">{c.location}</p>}
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap justify-end">
+                        <Button variant="outline" size="sm" onClick={() => analyzeApplicant(app)} data-testid={`app-analyze-btn-${app.id}`}>
+                          <Sparkles className="h-4 w-4 mr-1 text-brand" />Analyser (IA)
+                        </Button>
+                        {c.id && (
+                          <Button variant="outline" size="sm" onClick={() => navigate(`/messages?to=${c.id}`)} data-testid={`app-contact-btn-${app.id}`}>
+                            <MessageSquare className="h-4 w-4 mr-1" />Contacter
+                          </Button>
+                        )}
                         {app.cv_url ? (
                           <Button variant="outline" size="sm" onClick={() => downloadCv(app.cv_url)} data-testid={`app-download-cv-${app.id}`}>
                             <Download className="h-4 w-4 mr-1" />CV
@@ -138,6 +167,8 @@ const ApplicationsForJob = () => {
           </div>
         )}
       </div>
+      <MatchDialog open={matchOpen} onOpenChange={setMatchOpen} loading={matchLoading} result={matchResult}
+        title={matchName ? `Compatibilité — ${matchName}` : 'Analyse du candidat (IA)'} />
       <Footer />
     </div>
   );
