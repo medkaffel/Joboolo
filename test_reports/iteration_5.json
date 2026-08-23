@@ -1,0 +1,26 @@
+{
+  "summary": "Lot 4 partial (geo-detect + radius search + real impressions + signup provenance) tested end-to-end on https://job-platform-next.preview.emergentagent.com. Backend: 9/9 pytest cases PASS in test_lot4_partial.py (geo/detect shape, Lyon radius=10 restricted to dept 69, radius=5 total <= radius=100 total, impressions record ONLY partner ids and ignore non-partner ids, empty payload -> recorded=0, /partner/performance exposes totals.impressions + ctr, /auth/register accepts signup_source/utm/referrer/landing, admin /users returns them, cleanup). Frontend: ALL 4 flows PASS — (1) fresh visit with no joboolo_country cookie triggers GET /api/geo/detect, prefills 'Où' with detected city ('Council Bluffs' from server IP as expected) and sets joboolo_country=US cookie; (2) SearchSection radius select works: 'Lyon' radius=5 -> 19 results vs radius=100 -> 204 results; (3) JobList useEffect fires POST /api/jobs/impressions exactly once on first search (20 partner ids) and does NOT re-fire on same-jobs re-render (session dedup via joboolo_impr works); (4) new candidate registered from UI shows a Provenance badge in admin Candidats tab (data-testid admin-candidates-source-<id> = 'direct' — first-touch attribution stored on first visit, which is the correct product behaviour).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_lot4_partial.py",
+    "/app/test_reports/pytest/lot4_partial.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "utils/attribution.js: captureAttribution is first-touch (short-circuits when localStorage 'joboolo_attribution' exists). This is a legitimate design choice, but any e2e test that lands on a URL with utm_source AFTER an earlier visit will see signup_source='direct' — worth documenting in the PRD / QA notes to avoid future confusion.",
+    "routes/geo.py detect(): when the client IP is a private/local range, url falls back to 'http://ip-api.com/json/' (empty path) — that endpoint uses the caller's public IP which in this preview resolves to a US datacenter (Council Bluffs). Fine for now, but if the app is deployed behind a CDN, expect X-Forwarded-For handling to be reviewed and add a country_code override for local-dev."
+  ],
+  "updated_files": ["/app/backend/tests/test_lot4_partial.py"],
+  "success_rate": { "backend": "100% (9/9)", "frontend": "100% (4/4)" },
+  "seed_data_creation": "Backend: created candidate TEST_prov_<hex>@example.com via /auth/register then deleted via /admin/users/{id} DELETE. Frontend: registered ui_prov_<hex>@example.com (kept — leaves 11 candidates in admin; can be cleaned up manually if desired).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Lot 4 partial is fully green. Radius uses /api/jobs?location=<city>&radius=<km> with geocoded loc + 2dsphere; the Lyon 5km/100km ratio (19 vs 204) confirms the geo filter works. Impressions dedup key is sessionStorage 'joboolo_impr'; call is fire-and-forget (JobList useEffect). Provenance uses localStorage 'joboolo_attribution' (first-touch), merged into POST /auth/register and /auth/register-partner in services/authService.js. Admin candidate row exposes 'Provenance' column with data-testid admin-candidates-source-<id>.",
+  "test_credentials": "admin@joboolo.fr / AdminJoboolo2026! ; partenaire@joboolo.fr / Partner2026!",
+  "rca_of_the_issue": "None — no defects observed for this iteration's scope."
+}

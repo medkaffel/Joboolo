@@ -1,0 +1,52 @@
+{
+  "summary": "Backend: 13/13 pytest passed (auth register/login/PUT me, google/session 401, alerts CRUD + send-now with sent:false & count>=0, employer company + job create/list/delete). Frontend: candidate login OK (no crash, dropdown shows), /profile renders with AlertsManager, create-alert-btn works, alert appears in profile, send-now/frequency change/delete work. Employer login can reach /post-job (form present) and /my-jobs (empty state OK). AuthModal shows only Google button — no Facebook/X/LinkedIn OAuth buttons. Discovered a P0 mixed-content bug: FastAPI trailing-slash 307 redirect downgrades HTTPS→HTTP for /api/applications and /api/saved-jobs (and any router with route path '/'), causing browser to block XHR on /my-applications and /saved-jobs pages.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "/api/applications  and  /api/saved-jobs (and any router mounted with route path '/')",
+        "issue": "FastAPI returns 307 with Location: http://joboolo-staging.preview.emergentagent.com/api/applications/ (HTTP not HTTPS). Browser blocks the request as mixed content. Frontend service calls api.get('/applications') without trailing slash; backend defines route as @router.get('/') behind prefix, triggering the redirect. Same pattern in companies.py (route path '/').",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "/my-applications and /saved-jobs load",
+        "issue": "XHR blocked by browser (Mixed Content) — see backend critical issue above. Pages still render empty state because request just errors.",
+        "affected_selectors": []
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "Global footer",
+        "issues": ["Footer copyright says '© 2025 Indeed' and social links labeled Facebook / Twitter / LinkedIn — brand is Joboolo, should be updated."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "FIX P0 mixed-content: either (a) set app = FastAPI(redirect_slashes=False) in backend/server.py, or (b) change route decorators from @router.get('/') to @router.get('') in applications.py, saved_jobs.py, companies.py, or (c) make frontend service always use trailing slash. Option (a) is the smallest, safest change.",
+    "Update footer branding from 'Indeed' to 'Joboolo' (cosmetic)."
+  ],
+  "critical_code_review_comments": [
+    "Backend routes mount with prefix + route '/' causing 307 redirects that Kubernetes ingress rewrites to http:// — root cause of mixed-content on any GET to those routers without trailing slash.",
+    "auth.py register/login/get_me/put_me all rebuild UserResponse manually — DRY violation, extract to helper (_build_user_response already exists but only used in google_session).",
+    "alerts.py _id generation uses timestamp() only — collision-prone under concurrent creation; consider uuid4."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "85%"},
+  "test_credentials": "Used candidate@joboolo.fr / Test1234 and employer@joboolo.fr / Test1234 as listed in /app/memory/test_credentials.md",
+  "seed_data_creation": "Test created transient TEST_Co_<ts> company and TEST job, both deleted via API in teardown.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest suite lives at /app/backend/tests/backend_test.py — re-run after fix. To verify mixed-content fix: curl -sI 'https://job-platform-next.preview.emergentagent.com/api/applications' — should be 200/401 (not 307 to http). Then reload /my-applications in the browser as logged-in candidate and confirm no console error 'Mixed Content'. Ignore ipapi.co CORS warnings — harmless. Real Google OAuth intentionally NOT tested (only 401 for invalid session_id).",
+  "rca of the issue": "FastAPI's default redirect_slashes=True issues a 307 when a request path doesn't match a route's trailing-slash form. The frontend axios client calls /api/applications (no slash); the backend route is defined as @router.get('/') inside a router with prefix /applications, so FastAPI redirects to /api/applications/. In this Kubernetes ingress setup the redirect Location header is built from the request scheme as seen by uvicorn (http), so the browser receives Location: http://.../api/applications/ and blocks the follow-up as mixed content. Fix in one line: FastAPI(redirect_slashes=False) — or align route paths to be trailing-slash-agnostic."
+}

@@ -1,0 +1,26 @@
+{
+  "summary": "Frontend-only regression for Lot 1 + Lot 2 (Jobijoba-style search UX) on https://job-platform-next.preview.emergentagent.com. All 14 requested flows verified end-to-end with Playwright. All pass. No critical or blocking issues. One minor UX note: 'recent-to-alert-0' uses window.prompt() for email capture instead of an in-app modal.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "RecentSearches → transform to alert", "issues": ["handleRecentToAlert uses window.prompt() (native browser dialog) to collect the email. Functional but inconsistent with the rest of the app which uses shadcn toasts/dialogs. Consider using an AlertModal for parity with the banner/slider blocks."]},
+      {"screen": "ResultsSidebar", "issues": ["Two elements match [data-testid=adsense-placeholder] (count=2) in the sidebar; if a single placeholder is intended, one of the duplicates should be removed or given a distinct testid."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "(Optional UX) Replace window.prompt in handleRecentToAlert with an in-app dialog for a consistent French UI experience.",
+    "(Optional) Deduplicate or rename the two [data-testid=adsense-placeholder] nodes in ResultsSidebar."
+  ],
+  "critical_code_review_comments": [
+    "JobList.jsx: alert-inline-block-banner is only rendered when jobs.length > 0 (line 149). If a search returns 0 jobs the banner disappears entirely; consider always showing the banner (with the compact 'no results' state) so users can still subscribe to future matches — this is exactly the value proposition of the alert."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not-tested", "frontend": "100%"},
+  "seed_data_creation": "Created 2 public alert subscriptions via /api/alerts/subscribe using test-inline@example.com / test-banner@example.com (no cleanup — public visitor flow, non-authenticated). localStorage joboolo_search_history was populated then cleared.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All Lot 1 + Lot 2 flows pass. Confirmed working: WhyJoboolo shows before search and hides after; empty-submit shows red warning 'Veuillez renseigner un métier/mot-clé ou une localisation…'; job & location autocomplete populate from DB and clicking option 0 fills the input; distance dropdown has options ['','5','10','25','50','100']; search for 'dev' returns 4 results with filter bar (contract/date/sort), advanced-search-toggle expanding a panel containing advanced-company/salary/remote, results-sidebar with adsense-placeholder (x2), alert-inline-block-compact, similar-searches with clickable similar-search-0 ('dev junior'), nearby-searches; alert-inline-block-banner banner subscribe → alert-block-done + success toast; alert-slider appears after search, submit works, close dismisses it and it does NOT reappear on subsequent searches in the same session; filter-contract-type=CDI, filter-date-posted, filter-sort, and advanced-company all re-run the search and update results-count; back-to-top-btn appears after scrollY>400 and smoothly scrolls to top (scrollY=0); footer-international with footer-country-es and footer-country-de present; recent-searches-section shows after searches with recent-search-0/recent-to-alert-0/recent-remove-0, clear-history-btn removes all and hides the section, and it does not appear when no history. Pagination not rendered (only 4 seed results for 'dev'), which matches the request note (acceptable when <=20 total). page scrolls down to results after submit (scrollY≈1016 post-search)."
+}

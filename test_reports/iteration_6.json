@@ -1,0 +1,23 @@
+{
+  "summary": "Frontend-only regression of /recruteur incremental changes (Joboolo). Verified: page loads with zero console/page errors; PRICING shows exactly 2 tiers (tier-cpc, tier-premium) and tier-targeted / 'Candidats Ciblés' are fully removed; Offre Premium shows 'À partir de' + 299€ '/ offre'; 'Vérification des profils par notre équipe d'experts.' bullet removed (only 2 feature bullets remain); new IMPORT section renders import-bullet-0/1/2 (Fichier XML, Autre source en ligne, Mise à jour continue) and import-cta smooth-scrolls to #devis; quote form submits successfully ('Demande envoyée'); admin Paramètres price config end-to-end (299 -> 349 -> reflected on /recruteur as 'À partir de 349€' -> reset back to 299 and verified); employer checkout dialog opens for recruteur@techcorp.fr and shows 3 packs (299/798/1196 €). No Stripe payment completed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Cosmetic/content consistency (non-blocking): the 'Candidats Ciblés' pricing tier was removed, but the FAQ item \"Qu'inclut le service Candidats ciblés sur-mesure ?\", the testimonial mentioning 'le service de candidats sur-mesure', and the feature CTA 'Recevoir des candidats ciblés' (scrollToQuote('targeted')) still reference the removed offer. Confirm with the user whether this copy should stay (it now maps to a quote request only).",
+    "RecruiterLanding.jsx: recruiterService.getPacks() failure is silently swallowed (.catch(() => {})), leaving the Premium price as '—' with no error state/retry. Consider a fallback price or a visible error indicator."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (per request)", "frontend": "100%"},
+  "seed_data_creation": "One quote request submitted via /recruteur form (TEST QA / TEST_QA_Co / test_qa@example.com). Admin setting recruiter_premium_price temporarily set to 349 then RESET to 299 (verified on /recruteur).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": false,
+  "test_credentials": "Admin /adminos: admin@joboolo.fr / AdminJoboolo2026! (dedicated admin login form, not AuthModal). Employer: recruteur@techcorp.fr / password123 with login role '🏢 Recruteur'.",
+  "context_for_next_testing_agent": "Admin dashboard login is a separate form at /adminos (data-testid admin-email/admin-password/admin-login-btn); AuthModal has no Administrateur role option. AuthModal login email/password inputs have no data-testid — use #login-email / #login-password. Recruiter premium price is currently 299 (default) in admin Paramètres (settings-recruiter-price). All 7 requested checks passed in this iteration.",
+  "rca_of_the_issue": "N/A - no defects found."
+}

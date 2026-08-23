@@ -1,0 +1,236 @@
+{
+  "theme_strategy": "light mode base with premium dark accent bands for contrast and conversion focus",
+  "typography": {
+    "headings": {
+      "family": "Outfit, sans-serif",
+      "weights": [500, 600, 700],
+      "letter_spacing": "tracking-tight to tracking-tighter",
+      "usage": "Use Outfit for all H1-H4. Emphasize tracking-tighter on large headings to create a modern, sleek SaaS feel."
+    },
+    "body": {
+      "family": "DM Sans, sans-serif",
+      "weights": [400, 500],
+      "letter_spacing": "normal",
+      "usage": "Use DM Sans for body text, form inputs, buttons, and badges. It ensures high readability and a clean corporate tech look."
+    }
+  },
+  "colors": {
+    "brand_primary": "#0055FF",
+    "brand_hover": "#0044CC",
+    "brand_50": "#EBF1FF",
+    "brand_100": "#D6E4FF",
+    "surface_main": "#FFFFFF",
+    "surface_secondary": "#F9FAFB",
+    "dark_accent": "#0A0A0A",
+    "text_primary": "#111827",
+    "text_secondary": "#4B5563",
+    "border_subtle": "#E5E7EB",
+    "rules": "Never use pure black for text, use #111827. Limit the primary blue (#0055FF) to CTAs, active states, and key highlights. Use dark_accent (#0A0A0A) for the final CTA band to create a high-contrast 'Swiss' aesthetic finish."
+  },
+  "layouts_and_spacing": {
+    "padding_scale": "p-4, p-8, p-12, p-16, p-24, p-32",
+    "section_gap": "gap-16 to gap-24 for vertical rhythm to let content breathe.",
+    "container": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8",
+    "border_radius": "rounded-2xl (0.75rem to 1rem) to match existing Joboolo identity."
+  },
+  "visual_enhancers": {
+    "glassmorphism": "Use for the sticky header: backdrop-blur-xl bg-white/80 border-b border-border_subtle. Never use a fully transparent header.",
+    "shadows": "Hover states on pricing cards and feature blocks should use hover:-translate-y-1 hover:shadow-xl transition-all duration-300.",
+    "borders": "1px subtle borders (border-gray-200) on cards to define edges cleanly without heavy box-shadows by default."
+  },
+  "motion": {
+    "entrance": "Staggered fade-up for grid items and hero content using framer-motion (initial opacity-0 translate-y-4, animate opacity-100 translate-y-0).",
+    "interactions": "Smooth transitions on buttons and links: transition-colors duration-200.",
+    "accessibility": "Respect prefers-reduced-motion."
+  },
+  "components_to_use": [
+    "shadcn/ui Button (Customized with #0055FF)",
+    "shadcn/ui Card (For pricing and testimonials)",
+    "shadcn/ui Accordion (For FAQ)",
+    "shadcn/ui Input, Textarea, Label (For Quote Form)",
+    "shadcn/ui Badge (For premium tags)",
+    "lucide-react (Icons - NO emojis)"
+  ],
+  "sections": [
+    {
+      "name": "Header (Shared)",
+      "instructions": "Sticky top, glassmorphism (bg-white/80 backdrop-blur-md). Logo left, Nav links center, 'Espace Recruteur' / 'Connexion' right.",
+      "copy": {
+        "nav_links": ["Offres", "Candidats", "Tarifs", "Contact"]
+      }
+    },
+    {
+      "name": "Hero",
+      "layout": "Two-column asymmetrical layout (lg:grid-cols-12). Left side (col-span-7) for copy and dual CTAs. Right side (col-span-5) for a premium image with a subtle offset pattern/blob behind it.",
+      "instructions": "H1 should be massive (text-5xl lg:text-6xl+). The CTAs must be side-by-side on desktop. Apply brand blue to primary CTA, outline to secondary.",
+      "copy": {
+        "badge": "Solution Recruteurs Premium",
+        "headline": "Recrutez les Meilleurs Talents. Plus Vite. Plus Loin.",
+        "subheadline": "Accédez à une audience premium de candidats qualifiés sur Joboolo. Publiez à l'unité, au clic, ou laissez nos experts sourcer vos futurs collaborateurs sur-mesure.",
+        "cta_primary": "Publier une offre",
+        "cta_secondary": "Demander un devis"
+      },
+      "image_url": "https://images.unsplash.com/photo-1573164574572-cb89e39749b4?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MDZ8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBvZmZpY2UlMjBidXNpbmVzcyUyMG1lZXRpbmd8ZW58MHx8fHwxNzg3MjMyMDIzfDA&ixlib=rb-4.1.0&q=85",
+      "image_alt": "Équipe de professionnels en réunion dans un bureau moderne"
+    },
+    {
+      "name": "Trust Strip / Stats",
+      "layout": "Full width light background (bg-gray-50/50), grid of 3 stats divided by subtle vertical rules (hidden on mobile).",
+      "instructions": "Use large prominent numbers in Outfit font, small descriptive text below. Very clean, high whitespace.",
+      "copy": {
+        "stat_1_number": "150 000+",
+        "stat_1_label": "Candidats qualifiés actifs",
+        "stat_2_number": "48h",
+        "stat_2_label": "Délai moyen du 1er entretien",
+        "stat_3_number": "95%",
+        "stat_3_label": "Taux de satisfaction employeur"
+      }
+    },
+    {
+      "name": "Comment ça marche",
+      "layout": "3-column grid (grid-cols-1 md:grid-cols-3) gap-8. Center aligned text inside cards.",
+      "instructions": "Use lucide-react icons inside circular blue-tinted wrappers (bg-[#EBF1FF] text-[#0055FF]). Keep descriptions punchy.",
+      "copy": {
+        "section_title": "Un processus de recrutement simplifié",
+        "step_1_title": "1. Choisissez votre formule",
+        "step_1_desc": "Publiez instantanément votre offre ou contactez-nous pour une stratégie sur-mesure.",
+        "step_2_title": "2. Ciblez avec précision",
+        "step_2_desc": "Notre technologie diffuse votre annonce auprès des profils les plus pertinents de notre réseau.",
+        "step_3_title": "3. Rencontrez vos talents",
+        "step_3_desc": "Recevez des candidatures qualifiées et engagez la conversation immédiatement."
+      }
+    },
+    {
+      "name": "Pricing / Services Tiers",
+      "layout": "3 columns. The middle card ('À l'unité') should be visually elevated (scale-105 on desktop) with a brand_primary top border or subtle shadow glow.",
+      "instructions": "Each tier MUST have a distinct CTA. Include Stripe payment mention for 'À l'unité'. Use checkmark icons for features.",
+      "copy": {
+        "section_title": "Des solutions adaptées à vos enjeux de recrutement",
+        "tier_1": {
+          "name": "Au clic (CPC)",
+          "target": "Budget flexible",
+          "price": "Sur mesure",
+          "features": ["Paiement uniquement au clic qualifié", "Maîtrise totale du budget", "Diffusion ciblée", "Statistiques en temps réel"],
+          "cta": "Créer une campagne",
+          "cta_style": "outline"
+        },
+        "tier_2": {
+          "name": "Offre Premium (À l'unité)",
+          "target": "Idéal pour un besoin urgent",
+          "price": "299€",
+          "period": "/ offre",
+          "badge": "Le plus populaire",
+          "features": ["Publication pendant 30 jours", "Mise en avant en tête de liste", "Alerte email ciblée aux candidats", "Paiement sécurisé via Stripe"],
+          "cta": "Publier maintenant",
+          "cta_style": "primary"
+        },
+        "tier_3": {
+          "name": "Candidats Ciblés",
+          "target": "Délégation totale",
+          "price": "Sur devis",
+          "features": ["Sourcing proactif par nos experts", "Pré-sélection rigoureuse", "Candidats parfaitement ciblés", "Accompagnement dédié"],
+          "cta": "Demander un devis",
+          "cta_style": "outline"
+        }
+      }
+    },
+    {
+      "name": "Feature: Candidats ciblés",
+      "layout": "Two-column (Image on left, content on right). Image should have rounded-2xl with a subtle offset decorative block.",
+      "instructions": "Use check-circle icons for bullet points. High emphasis on quality over quantity.",
+      "copy": {
+        "headline": "Ne perdez plus de temps avec les CV non pertinents",
+        "subheadline": "Notre promesse : des candidats sélectionnés et parfaitement ciblés pour votre entreprise.",
+        "bullets": [
+          "Matching intelligent basé sur les compétences réelles.",
+          "Vérification des profils par notre équipe d'experts.",
+          "Gain de temps massif sur votre présélection."
+        ]
+      },
+      "image_url": "https://images.unsplash.com/photo-1522071820081-009f0129c71c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHwyfHxidXNpbmVzcyUyMHRlYW0lMjBjb2xsYWJvcmF0aW9ufGVufDB8fHx8MTc4NzIzMjAyNHww&ixlib=rb-4.1.0&q=85",
+      "image_alt": "Collaboration d'équipe sur un projet d'entreprise"
+    },
+    {
+      "name": "Testimonials",
+      "layout": "Grid of 2 testimonial cards. Clean minimal design with avatar, name, role, and quote.",
+      "instructions": "Cards should have bg-white, subtle border. Quote text should be text-gray-600.",
+      "copy": {
+        "section_title": "Ce que pensent nos recruteurs",
+        "reviews": [
+          {
+            "quote": "Grâce à l'offre Premium, nous avons recruté notre Lead Dev en moins d'une semaine. La qualité des profils est incomparable.",
+            "author": "Marie L.",
+            "role": "DRH, TechStart"
+          },
+          {
+            "quote": "Le service de candidats sur-mesure nous a fait gagner des dizaines d'heures. L'équipe a parfaitement compris notre culture d'entreprise.",
+            "author": "Thomas V.",
+            "role": "CEO, InnovAgency"
+          }
+        ]
+      },
+      "images": [
+        "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2MzR8MHwxfHNlYXJjaHwyfHxjb25maWRlbnQlMjBwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdHxlbnwwfHx8fDE3ODcyMzIwMjR8MA&ixlib=rb-4.1.0&q=85",
+        "https://images.unsplash.com/photo-1560250097-0b93528c311a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2MzR8MHwxfHNlYXJjaHwxfHxjb25maWRlbnQlMjBwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdHxlbnwwfHx8fDE3ODcyMzIwMjR8MA&ixlib=rb-4.1.0&q=85"
+      ]
+    },
+    {
+      "name": "FAQ",
+      "layout": "Narrow center column (max-w-3xl) using shadcn Accordion.",
+      "instructions": "Keep typography legible. Question text medium weight.",
+      "copy": {
+        "section_title": "Questions fréquentes",
+        "questions": [
+          {
+            "q": "Puis-je payer mon annonce Premium directement en ligne ?",
+            "a": "Oui, le paiement est 100% sécurisé via Stripe. Votre annonce est publiée instantanément après validation."
+          },
+          {
+            "q": "Comment fonctionne le modèle Au clic (CPC) ?",
+            "a": "Vous définissez un budget maximum. Vous ne payez que lorsqu'un candidat clique sur votre offre. C'est idéal pour maîtriser ses coûts."
+          },
+          {
+            "q": "Qu'inclut le service Sur-mesure ?",
+            "a": "Un expert dédié s'occupe du sourcing, de la qualification téléphonique et vous présente uniquement une short-list de candidats 100% qualifiés."
+          }
+        ]
+      }
+    },
+    {
+      "name": "Quote / Contact Form",
+      "layout": "Split layout. Left: Contact text and benefits. Right: Form inside a Card.",
+      "instructions": "Form requires First Name, Last Name, Company, Email, Phone, and Need (Textarea). Use shadcn inputs.",
+      "copy": {
+        "headline": "Parlons de vos besoins de recrutement",
+        "subheadline": "Remplissez ce formulaire et un de nos experts vous recontactera sous 24h ouvrées.",
+        "form_fields": {
+          "firstname": "Prénom",
+          "lastname": "Nom",
+          "company": "Entreprise",
+          "email": "Email professionnel",
+          "message": "Décrivez votre besoin (optionnel)",
+          "submit": "Demander un devis"
+        }
+      }
+    },
+    {
+      "name": "Final CTA Band",
+      "layout": "Full width, heavily padded (py-24). Dark background (#0A0A0A) to create a striking contrast at the end.",
+      "instructions": "Text must be white. The button should use the brand_primary blue, maintaining high contrast.",
+      "copy": {
+        "headline": "Prêt à trouver votre perle rare ?",
+        "subheadline": "Rejoignez les milliers d'entreprises qui recrutent efficacement avec Joboolo.",
+        "cta": "Créer mon compte recruteur"
+      }
+    }
+  ],
+  "universal_guidelines_for_main_agent": [
+    "NEVER use generic gradients. Stick to the refined color palette provided.",
+    "Ensure glass-morphism effects use backdrop-blur-xl and semi-transparent backgrounds (e.g., bg-white/80). Never use 100% transparent header background.",
+    "NO emojis. Use lucide-react icons for visual anchors.",
+    "All interactive elements (buttons, inputs, links) MUST have a `data-testid` attribute (e.g., data-testid='hero-cta-publish').",
+    "Maintain high contrast ratios for text. Do not use pure gray on gray.",
+    "Component Reuse: Heavily leverage existing shadcn/ui components (Button, Card, Accordion, Input, Textarea).",
+    "Create depth through layering: images should occasionally overlap backgrounds, and cards should pop on hover (-translate-y-1 shadow-lg)."
+  ]
+}

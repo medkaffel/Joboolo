@@ -1,0 +1,44 @@
+{
+  "summary": "Lot 4 (geo hierarchy, partner self-registration, cascade delete, XML mandatory, logos, campaign UI icons, PostJob location autocomplete) e2e tested on https://job-platform-next.preview.emergentagent.com. Backend: 11/13 pytest cases PASS (test_lot4.py). Frontend: ALL flows PASS — header 'Partenaire' opens AuthModal (no navigation), Inscription tab exposes 'Partenaire - Jobboard / Diffusion permanente' option, company input is revealed on selection, pending submit shows 'Demande envoyée / validation / reçue' toast and does NOT store a token in localStorage, subsequent login shows 'en attente de validation' error, PostJob location autocomplete returns real suggestions (PARIS (75000)…), campaign dialog shows 'URL du flux XML *' with 'Champ obligatoire' helper + toast 'URL du flux XML requise' when empty, magnifier icons (5) open campaign-jobs-dialog, edit pencils (5) open the edit dialog pre-filled and contain campaign-logo-input, partner-logo-input is present on /partenaire, and 20 job-card-logo-<id> elements load their partner logo images from /api/files/public/... (HTTP 200 PNG). Two GEO backend tests FAIL — real functional defects (see below). Everything else works end-to-end.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/jobs?location={department_or_region_name}",
+        "issue": "Geo hierarchy filter is polluted by a substring text match. For location='Loire' the response includes jobs with postcodes 43120 (Monistrol-Sur-Loire, dept 43 — Haute-Loire) and 49140 (SEICHES SUR LE LOIRE, dept 49 — Maine-et-Loire) because routes/jobs.py adds `{location: {$regex: escape(location), $options: 'i'}}` as the first branch of the OR — any job whose location string contains the word 'Loire' matches. Same issue for location='Rhône' — a job with postcode 38370 (Sablons sur Rhône, Isère) is returned. Expected: when resolve_location_codes() returns a non-empty list (query IS an exact department/region name), the search should restrict to postcode regex only, NOT also apply the raw text regex on the location string. Fix: in routes/jobs.py search_jobs, only include the raw-text branch when `codes` from resolve_location_codes is empty. Region-name case (Pays de la Loire) already works correctly (only 44/49/53/72/85 postcodes returned).",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/auth/register-partner vs POST /api/auth/login",
+        "issue": "Email casing inconsistency. register-partner lowercases the email before storing (`data.email.strip().lower()`), but /api/auth/login (and get_user_by_email) do exact-case lookup. Consequence: if a user registers with 'Foo@example.com', they must log in as 'foo@example.com' or login returns 401 'Incorrect email or password' (instead of the expected 403 'en attente de validation'). Recommend lowercasing/normalising email at the auth layer as well (or in LoginRequest validator)."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_lot4.py",
+    "/app/test_reports/pytest/lot4_results.xml"
+  ],
+  "action_items": [
+    "HIGH — Fix geo hierarchy in /api/backend/routes/jobs.py: when resolve_location_codes(location) returns codes, use ONLY the postcode-regex branches in loc_or (drop the raw `re.escape(location)` text match) so 'Loire' does not return Haute-Loire/Maine-et-Loire jobs and 'Rhône' does not return Isère jobs. Keep the raw-text branch only when codes == [] (city/postcode/free-text fallback).",
+    "MINOR — Normalise email casing at login (or add EmailStr normalization in LoginRequest) to match the lowercase storage used by /auth/register-partner."
+  ],
+  "critical_code_review_comments": [
+    "routes/jobs.py search_jobs: `loc_or.append({'location': {'$regex': postcode_regex(code)}})` correctly restricts by postcode, but `loc_or = [{'location': {'$regex': re.escape(location), '$options': 'i'}}]` is initialised unconditionally and remains inside the $or. This is exactly what causes 'Loire' to leak into Haute-Loire/Maine-et-Loire — the substring 'Loire' is in those location strings.",
+    "routes/auth.py register/register-partner: `register` does NOT lowercase the email, `register-partner` DOES. This asymmetry combined with case-sensitive get_user_by_email causes the observed 401 (vs expected 403) if the client submits mixed-case emails."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_lot4.py (new)"
+  ],
+  "success_rate": {"backend": "85% (11/13 in test_lot4.py; the 2 failures are real geo defects)", "frontend": "100%"},
+  "seed_data_creation": "Backend: created + deleted TEST_WithXML_* campaign, uploaded a partner logo for partenaire@joboolo.fr (persists — used by seed data), registered a pending partner `test_partner_<hex>@example.com` then activated it via admin toggle (left active). Frontend: registered `ui_partner_<hex>@example.com` (kept as pending). No jobs modified.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Only outstanding defect is the geo-hierarchy text-vs-postcode conflict in routes/jobs.py (Loire → returns 43xxx/49xxx, Rhône → returns 38xxx). Region-name resolution (Pays de la Loire → 44/49/53/72/85) works, city resolution (Paris) works, cascade delete works, xml_feed_url mandatory (400 without) works, /api/partner/logo + /api/partner/campaigns/{id}/logo + /api/files/public/{path} (200 image, no auth) work, /api/auth/register-partner creates pending users and /api/auth/login returns 403 for pending, admin `POST /api/admin/users/{id}/toggle` activates. Frontend: nav-partenaire opens modal, register-usertype-trigger + register-company-input + register-submit-btn all in place, PostJob autocomplete + campaign-view-jobs-<id> + campaign-edit-<id> + campaign-jobs-dialog + campaign-logo-input + partner-logo-input + job-card-logo-<id> all rendered and functional. After the geo fix, re-run backend/tests/test_lot4.py TestGeoHierarchy to validate.",
+  "rca_of_the_issue": "In /app/backend/routes/jobs.py (search_jobs, ~line 148-155), the location filter builds `loc_or = [{location: {$regex: escape(location), $options: 'i'}}]` and then appends postcode regex branches. Because $or is any-match, jobs whose location text simply contains the word 'Loire' (e.g. 'Monistrol-Sur-Loire (43120)' or 'SEICHES SUR LE LOIRE (49140)') pass the filter even though their postcode is not in department 42. Fix: only add the raw-text branch when resolve_location_codes(location) returns an empty list."
+}

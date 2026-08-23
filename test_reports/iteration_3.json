@@ -1,0 +1,32 @@
+{
+  "summary": "Lot 3 (Monétisation & partenaires) end-to-end tested on https://job-platform-next.preview.emergentagent.com. 16/16 backend tests pass (admin settings GET/PUT + persistence, xml-feeds CRUD with login-less partner creation & existing-partner assignment + import trigger, admin alerts list/filter/toggle/delete, partner campaigns per_click + per_posting CRUD with settings-driven validity). Full Playwright coverage of admin Paramètres / Flux XML / Alertes tabs and partner campaigns (create per_click, create per_posting hides cpc/budget & shows 'Validité 30 j', toggle Active↔En pause, delete, empty-name validation toast, regression on recharge + XML import). All UI + integration flows PASS.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "PartnerDashboard header subtitle", "issues": ["React hydration console warning: 'In HTML, <div> cannot be a descendant of <p>' — the Badge (which renders a div) is placed inside a <p className=\"text-slate-500 text-sm mt-1\"> in PartnerDashboard header near 'Facturation :'. Purely cosmetic (React warning only), no user-visible bug, but should be fixed by changing the wrapper <p> to <div> or moving the Badge out of the paragraph."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_lot3.py",
+    "/app/test_reports/pytest/lot3_results.xml"
+  ],
+  "action_items": [
+    "(Minor / cosmetic) In PartnerDashboard.jsx, replace the <p> that wraps the billing-mode Badge with a <div> (or <span>) to eliminate the React hydration warning 'div cannot be a descendant of p'."
+  ],
+  "critical_code_review_comments": [
+    "backend/routes/admin.py: create_xml_feed with a new (login-less) partner inserts a User with hashed_password=None. Confirmed: /api/auth/login for such an email returns 401 (safe, per credentials.md note). Consider adding an index on users.email and setting is_active default explicitly on the User model to avoid future silent bugs.",
+    "backend/routes/payments.py::create_campaign silently drops cpc/cpc_max/budget_limit when billing_mode='per_posting' (sets them to None). Frontend already hides those fields, so behavior is consistent, but consider explicitly rejecting the request (422) if the client sends them for per_posting to make the contract clearer.",
+    "PartnerCampaigns.jsx uses window.confirm() for delete — inconsistent with the rest of the shadcn-based UI (which uses AlertDialog). Not blocking."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_lot3.py (new)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100%"},
+  "seed_data_creation": "Created & cleaned up: TEST_Feed_* + TEST_ExistFeed_* xml feeds (deleted), TEST_Camp_Click_* + TEST_Camp_Post_* campaigns (deleted), one alert 'TEST_lot3' by candidate@joboolo.fr (deleted by admin), one login-less partner TEST_Company_* (kept — matches feature behavior, cleanup only happens if the feed is deleted; login-less partner users remain but are inactive from login perspective). UI test also created + deleted: UI_Feed_*, UI_Company_*, UI_Click_*, UI_Post_*.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All Lot 3 flows PASS end-to-end. Backend endpoints verified: GET/PUT /api/admin/settings (persistence confirmed across reload); GET/POST/DELETE /api/admin/xml-feeds (both new-login-less and existing-partner assignment work; login-less partner is inserted with hashed_password=None + no_login=True in profile); POST /api/admin/xml-feeds/{id}/import responds (example.com returns 502 upstream which is expected and surfaced as 'Erreur' destructive toast in the UI); GET /api/admin/alerts with search + active=true/false filters; PUT /api/admin/alerts/{id}/toggle and DELETE /api/admin/alerts/{id}; POST /api/partner/campaigns applies settings.pack_validity_days=30 to per_posting campaigns (verified by round-trip and by row text 'Validité 30 j'); PUT status='paused'|'active' works; DELETE works. Frontend: tab-settings shows values 30/10 by default; changing + saving + reloading confirms persistence; tab-feeds new-feed-btn opens feed-dialog and both feed-assign='new' (feed-new-company) and 'existing' (feed-partner-select) code paths save; feed-import-* triggered surfaces error toast for unreachable example.com URL as expected; tab-alerts filter/toggle/delete OK; partner dashboard shows Mes campagnes d'affichage with new-campaign-btn; empty name → 'Nom requis' toast; per_click billing shows cpc/cpc-max/budget inputs, per_posting hides them and shows the admin-defined-validity note; toggle flips Active↔En pause badge; delete removes row; regression: partner-recharge-btn, partner-import-btn, partner-feed-url still functional. Only console noise is a benign React hydration warning about <div> inside <p> in the partner header Badge (documented under design_issues).",
+  "rca_of_the_issue": "N/A — no defects detected in Lot 3 scope. Only a cosmetic React DOM-nesting warning that does not affect runtime behavior."
+}
