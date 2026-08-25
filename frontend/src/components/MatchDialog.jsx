@@ -64,7 +64,7 @@ const MatchDialog = ({ open, onOpenChange, loading, result, title = 'Analyse de 
                 </p>
                 <ul className="space-y-1.5">
                   {result.strengths.map((s, i) => (
-                    <li key={i} className="text-sm text-slate-600 flex items-start gap-2">
+                    <li key={`strength-${i}`} className="text-sm text-slate-600 flex items-start gap-2">
                       <span className="text-green-600 mt-0.5">•</span>{s}
                     </li>
                   ))}
@@ -79,7 +79,7 @@ const MatchDialog = ({ open, onOpenChange, loading, result, title = 'Analyse de 
                 </p>
                 <ul className="space-y-1.5">
                   {result.gaps.map((g, i) => (
-                    <li key={i} className="text-sm text-slate-600 flex items-start gap-2">
+                    <li key={`gap-${i}`} className="text-sm text-slate-600 flex items-start gap-2">
                       <span className="text-amber-600 mt-0.5">•</span>{g}
                     </li>
                   ))}

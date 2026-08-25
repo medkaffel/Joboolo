@@ -28,7 +28,11 @@ const Messages = () => {
   const scrollRef = useRef(null);
 
   const loadConversations = useCallback(async () => {
-    try { setConversations(await messageService.getConversations()); } catch { /* ignore */ }
+    try {
+      setConversations(await messageService.getConversations());
+    } catch (error) {
+      console.error('Échec du chargement des conversations:', error);
+    }
   }, []);
 
   const loadThread = useCallback(async (otherId) => {

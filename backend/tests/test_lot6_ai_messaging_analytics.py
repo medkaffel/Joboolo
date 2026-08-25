@@ -76,13 +76,28 @@ class TestAIRecommendations:
         d = r.json()
         assert set(["profile_complete", "recommendations", "ai"]).issubset(d.keys())
         assert isinstance(d["recommendations"], list)
-        assert d["ai"] is True, "AI ranking fell back to local ordering (ai=False)"
+        assert d["profile_complete"] is True
         assert len(d["recommendations"]) > 0, "No recommendations returned"
         first = d["recommendations"][0]
         assert "job" in first and first["job"].get("id")
         assert "_id" not in first["job"]
+
+    def test_recommendations_are_ai_scored_and_relevant(self, cand_auth):
+        """Seed candidate skills = JavaScript/React/Node.js/Python -> recs should be AI-scored & tech."""
+        r = requests.get(f"{BASE_URL}/api/ai/recommendations", headers=cand_auth["headers"], timeout=AI_TIMEOUT)
+        assert r.status_code == 200, r.text[:500]
+        d = r.json()
+        recs = d["recommendations"]
+        assert d["ai"] is True, (
+            "AI ranking produced no result (ai=False) -> recommendations returned without "
+            f"score/reason. Titles: {[x['job'].get('title') for x in recs][:5]}"
+        )
+        first = recs[0]
         assert isinstance(first["score"], int) and 0 <= first["score"] <= 100
         assert first["reason"], "Missing AI reason"
+        skills = ["javascript", "react", "node", "python", "développeur", "developpeur", "dev"]
+        titles = " ".join((x["job"].get("title") or "") for x in recs).lower()
+        assert any(s in titles for s in skills), f"No skill-relevant job recommended. Titles: {titles[:300]}"
 
     def test_recommendations_forbidden_for_employer(self, emp_auth):
         r = requests.get(f"{BASE_URL}/api/ai/recommendations", headers=emp_auth["headers"], timeout=60)
@@ -123,7 +138,7 @@ class TestAIMatchJob:
 # ---------------- AI match (employer -> application) ----------------
 class TestAIMatchApplication:
     def test_match_application(self, emp_auth):
-        jr = requests.get(f"{BASE_URL}/api/jobs/my-jobs", headers=emp_auth["headers"], timeout=30)
+        jr = requests.get(f"{BASE_URL}/api/jobs/mine", headers=emp_auth["headers"], timeout=30)
         assert jr.status_code == 200, jr.text[:300]
         payload = jr.json()
         my_jobs = payload.get("jobs") if isinstance(payload, dict) else payload
@@ -169,7 +184,8 @@ class TestMessaging:
         cand_id = cand_auth["user"]["id"]
         text = f"TEST_msg_{uuid.uuid4().hex[:6]}"
 
-        # baseline employer unread
+        # clear any pre-existing unread in this thread so the baseline is deterministic
+        requests.get(f"{BASE_URL}/api/messages/thread/{cand_id}", headers=emp_auth["headers"], timeout=30)
         u0 = requests.get(f"{BASE_URL}/api/messages/unread-count", headers=emp_auth["headers"], timeout=30)
         assert u0.status_code == 200
         before = u0.json()["count"]
