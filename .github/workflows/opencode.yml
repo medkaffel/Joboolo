@@ -32,5 +32,5 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: openai/gpt-5 nano
+          model: openai/gpt-5-nano
           use_github_token: true
