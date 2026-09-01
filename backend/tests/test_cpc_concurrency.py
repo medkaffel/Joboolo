@@ -1,287 +1,342 @@
-"""P0-004: CPC atomic debit concurrency tests.
+"""P0-004 — isolated tests for atomic CPC debit.
 
-Tests that a billable click never makes the partner balance negative,
-even under concurrent requests. Also covers exact balance, insufficient
-balance, CPC=0, and non-partner scenarios.
+No real MongoDB, backend server, network call, seeded account, or secret is used.
+The fake partner collection models MongoDB's single-document atomic update with
+an asyncio.Lock so concurrent calls exercise the route's exact control flow.
 """
-import os
-import time
+
 import asyncio
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
 import pytest
-import httpx
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
-if not BASE_URL:
-    with open("/app/frontend/.env") as f:
-        for line in f:
-            if line.startswith("REACT_APP_BACKEND_URL="):
-                BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
-API = f"{BASE_URL}/api"
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+JOBS_PATH = BACKEND_DIR / "routes" / "jobs.py"
 
-ADMIN = {"email": "admin@joboolo.fr", "password": "AdminJoboolo2026!"}
-PARTNER = {"email": "partenaire@joboolo.fr", "password": "Partner2026!"}
+PARTNER_ID = "partner_1"
+JOB_ID = "job_1"
 
 
-def _login(creds):
-    import requests as sync_requests
-    r = sync_requests.post(f"{API}/auth/login", json=creds)
-    assert r.status_code == 200, f"login failed for {creds['email']}: {r.status_code} {r.text}"
-    return r.json()["token"]["access_token"]
+class _HTTPException(Exception):
+    def __init__(self, status_code, detail=None):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
 
 
-def _h(tok):
-    return {"Authorization": f"Bearer {tok}"}
+class _Router:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def _decorator(self, *args, **kwargs):
+        def deco(fn):
+            return fn
+        return deco
+
+    get = post = put = delete = _decorator
 
 
-@pytest.fixture(scope="module")
-def admin_token():
-    return _login(ADMIN)
+class _Model:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+    def dict(self):
+        return dict(self.__dict__)
 
 
-@pytest.fixture(scope="module")
-def partner_token():
-    return _login(PARTNER)
+class _UserType:
+    EMPLOYER = "employer"
 
 
-class TestAtomicCpcDebit:
-    """Test that CPC debit is atomic: balance >= cpc is enforced in one MongoDB operation."""
-
-    def test_exact_balance_debit(self, admin_token, partner_token):
-        """Balance=1.00, CPC=0.50 → balance=0.50, total_clicks=1, total_spent=0.50."""
-        # Get current partner balance
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        assert r.status_code == 200
-        partners = r.json()
-        partner = next((p for p in partners if p.get("email") == PARTNER["email"]), None)
-        assert partner, f"Partner {PARTNER['email']} not found"
-        initial_balance = float(partner.get("balance", 0))
-
-        # Find a partner job with CPC
-        r = requests.get(f"{API}/jobs", headers=_h(partner_token))
-        assert r.status_code == 200
-        jobs = r.json().get("jobs", [])
-        partner_job = None
-        for j in jobs:
-            if j.get("is_partner") and j.get("cpc") and j.get("cpc") > 0:
-                partner_job = j
-                break
-
-        if not partner_job:
-            pytest.skip("No partner job with CPC found")
-
-        job_id = partner_job["id"]
-        cpc = float(partner_job["cpc"])
-
-        # Click
-        r = requests.post(f"{API}/jobs/{job_id}/click", headers=_h(partner_token))
-        assert r.status_code == 200
-
-        # Verify balance decreased by cpc
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        assert r.status_code == 200
-        updated = next((p for p in r.json() if p.get("email") == PARTNER["email"]), None)
-        assert updated, "Partner not found after click"
-        new_balance = float(updated.get("balance", 0))
-        assert abs(new_balance - (initial_balance - cpc)) < 0.01, (
-            f"Balance mismatch: expected ~{initial_balance - cpc}, got {new_balance}"
-        )
-        assert updated.get("total_clicks", 0) > partner.get("total_clicks", 0)
-
-    def test_insufficient_balance_no_debit(self, admin_token, partner_token):
-        """Balance < CPC → no debit, click_events cost=0, job stopped."""
-        # This test verifies behavior when balance is too low
-        # We test by finding a job whose CPC exceeds remaining balance
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        assert r.status_code == 200
-        partners = r.json()
-        partner = next((p for p in partners if p.get("email") == PARTNER["email"]), None)
-        if not partner:
-            pytest.skip("Partner not found")
-
-        current_balance = float(partner.get("balance", 0))
-
-        # Find a partner job with CPC > current_balance
-        r = requests.get(f"{API}/jobs", headers=_h(partner_token))
-        assert r.status_code == 200
-        jobs = r.json().get("jobs", [])
-
-        high_cpc_job = None
-        for j in jobs:
-            if j.get("is_partner") and j.get("cpc") and float(j["cpc"]) > current_balance:
-                high_cpc_job = j
-                break
-
-        if not high_cpc_job:
-            pytest.skip("No partner job with CPC exceeding current balance")
-
-        job_id = high_cpc_job["id"]
-
-        # Click should not debit
-        r = requests.post(f"{API}/jobs/{job_id}/click", headers=_h(partner_token))
-        assert r.status_code == 200
-
-        # Verify balance unchanged
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        updated = next((p for p in r.json() if p.get("email") == PARTNER["email"]), None)
-        assert updated, "Partner not found"
-        assert float(updated.get("balance", 0)) == current_balance, (
-            f"Balance should not change on insufficient funds"
-        )
-
-    def test_cpc_zero_no_debit(self, admin_token, partner_token):
-        """CPC=0 → no debit, total_clicks still incremented."""
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        partners = r.json()
-        partner = next((p for p in partners if p.get("email") == PARTNER["email"]), None)
-        if not partner:
-            pytest.skip("Partner not found")
-        initial_balance = float(partner.get("balance", 0))
-
-        # Find a partner job with CPC=0
-        r = requests.get(f"{API}/jobs", headers=_h(partner_token))
-        jobs = r.json().get("jobs", [])
-        zero_cpc_job = None
-        for j in jobs:
-            if j.get("is_partner") and (j.get("cpc") is None or float(j.get("cpc", 0)) == 0):
-                zero_cpc_job = j
-                break
-
-        if not zero_cpc_job:
-            pytest.skip("No partner job with CPC=0 found")
-
-        job_id = zero_cpc_job["id"]
-
-        r = requests.post(f"{API}/jobs/{job_id}/click", headers=_h(partner_token))
-        assert r.status_code == 200
-
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        updated = next((p for p in r.json() if p.get("email") == PARTNER["email"]), None)
-        assert updated, "Partner not found"
-        assert float(updated.get("balance", 0)) == initial_balance, (
-            f"Balance should not change when CPC=0"
-        )
-
-    def test_non_partner_no_billing(self, partner_token):
-        """Non-partner job → no click_events, no billing."""
-        r = requests.get(f"{API}/jobs", headers=_h(partner_token))
-        jobs = r.json().get("jobs", [])
-        regular_job = next((j for j in jobs if not j.get("is_partner")), None)
-        if not regular_job:
-            pytest.skip("No non-partner job found")
-
-        job_id = regular_job["id"]
-        r = requests.post(f"{API}/jobs/{job_id}/click", headers=_h(partner_token))
-        # Should return 400 (non-partner job)
-        assert r.status_code == 400
+class _UpdateResult:
+    def __init__(self, modified_count):
+        self.modified_count = modified_count
 
 
-class TestConcurrencyCpcDebit:
-    """Test that concurrent clicks never make balance negative."""
+class _AtomicPartnerCollection:
+    """Small in-memory model of MongoDB atomic find-filter + update semantics."""
 
-    def _get_partner_balance(self, admin_token):
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        assert r.status_code == 200
-        partners = r.json()
-        partner = next((p for p in partners if p.get("email") == PARTNER["email"]), None)
-        assert partner, "Partner not found"
-        return float(partner.get("balance", 0))
+    def __init__(self, profile):
+        self.profile = dict(profile)
+        self._lock = asyncio.Lock()
+        self.atomic_filters = []
 
-    def _get_partner_info(self, admin_token):
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        assert r.status_code == 200
-        partners = r.json()
-        partner = next((p for p in partners if p.get("email") == PARTNER["email"]), None)
-        assert partner, "Partner not found"
-        return partner
+    @staticmethod
+    def _matches(document, query):
+        for key, expected in query.items():
+            actual = document.get(key)
+            if isinstance(expected, dict) and "$gte" in expected:
+                if actual is None or actual < expected["$gte"]:
+                    return False
+            elif actual != expected:
+                return False
+        return True
 
-    @pytest.mark.asyncio
-    async def test_two_concurrent_clicks_balance_for_one(self, admin_token, partner_token):
-        """2 concurrent clicks, balance allows only 1 → exactly 1 charged, balance never negative."""
-        balance = self._get_partner_balance(admin_token)
-        partner_info = self._get_partner_info(admin_token)
+    async def find_one(self, query):
+        async with self._lock:
+            if self._matches(self.profile, query):
+                return dict(self.profile)
+            return None
 
-        # Find a partner job where CPC <= balance (so at least 1 can be charged)
-        r = requests.get(f"{API}/jobs", headers=_h(partner_token))
-        jobs = r.json().get("jobs", [])
-        eligible_job = None
-        for j in jobs:
-            if j.get("is_partner") and j.get("cpc") and 0 < float(j["cpc"]) <= balance:
-                eligible_job = j
-                break
+    async def update_one(self, query, update):
+        async with self._lock:
+            if "balance" in query and isinstance(query["balance"], dict):
+                self.atomic_filters.append(dict(query))
+            if not self._matches(self.profile, query):
+                return _UpdateResult(0)
+            for key, value in update.get("$inc", {}).items():
+                self.profile[key] = self.profile.get(key, 0) + value
+            for key, value in update.get("$set", {}).items():
+                self.profile[key] = value
+            return _UpdateResult(1)
 
-        if not eligible_job:
-            pytest.skip("No partner job with CPC <= current balance")
 
-        job_id = eligible_job["id"]
-        cpc = float(eligible_job["cpc"])
+class _JobsCollection:
+    def __init__(self, job):
+        self.job = dict(job)
+        self._lock = asyncio.Lock()
 
-        # Ensure balance < 2*cpc so only 1 can succeed
-        # We'll use the actual balance and trust that the atomic check handles it
-        initial_clicks = partner_info.get("total_clicks", 0)
+    async def find_one(self, query):
+        async with self._lock:
+            for key, expected in query.items():
+                if self.job.get(key) != expected:
+                    return None
+            return dict(self.job)
 
-        async with httpx.AsyncClient() as client:
-            # Fire 2 concurrent clicks
-            tasks = [
-                client.post(f"{API}/jobs/{job_id}/click", headers=_h(partner_token))
-                for _ in range(2)
-            ]
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
+    async def update_one(self, query, update):
+        async with self._lock:
+            if self.job.get("_id") != query.get("_id"):
+                return _UpdateResult(0)
+            for key, value in update.get("$inc", {}).items():
+                self.job[key] = self.job.get(key, 0) + value
+            for key, value in update.get("$set", {}).items():
+                self.job[key] = value
+            return _UpdateResult(1)
 
-        # Both should succeed HTTP-wise (not error)
-        for resp in responses:
-            if isinstance(resp, Exception):
-                pytest.fail(f"Concurrent request raised exception: {resp}")
-            assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    async def update_many(self, query, update):
+        return await self.update_one({"_id": self.job.get("_id")}, update)
 
-        # Verify balance never negative
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        updated = next((p for p in r.json() if p.get("email") == PARTNER["email"]), None)
-        assert updated, "Partner not found after concurrency test"
-        final_balance = float(updated.get("balance", 0))
-        assert final_balance >= 0, f"Balance is negative: {final_balance}"
-        assert final_balance <= balance, f"Balance increased: {final_balance} > {balance}"
 
-    @pytest.mark.asyncio
-    async def test_five_concurrent_clicks_balance_for_two(self, admin_token, partner_token):
-        """5 concurrent clicks, balance allows ~2 → balance never negative, total_clicks=5."""
-        partner_info = self._get_partner_info(admin_token)
-        balance = float(partner_info.get("balance", 0))
+class _EventsCollection:
+    def __init__(self):
+        self.records = []
+        self._lock = asyncio.Lock()
 
-        r = requests.get(f"{API}/jobs", headers=_h(partner_token))
-        jobs = r.json().get("jobs", [])
-        eligible_job = None
-        for j in jobs:
-            if j.get("is_partner") and j.get("cpc") and 0 < float(j["cpc"]) <= balance:
-                eligible_job = j
-                break
+    async def insert_one(self, document):
+        async with self._lock:
+            self.records.append(dict(document))
+        return types.SimpleNamespace(inserted_id=len(self.records))
 
-        if not eligible_job:
-            pytest.skip("No partner job with CPC <= current balance")
 
-        job_id = eligible_job["id"]
-        initial_clicks = partner_info.get("total_clicks", 0)
+class _NoopCollection:
+    async def find_one(self, query):
+        return None
 
-        async with httpx.AsyncClient() as client:
-            tasks = [
-                client.post(f"{API}/jobs/{job_id}/click", headers=_h(partner_token))
-                for _ in range(5)
-            ]
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
+    async def update_one(self, query, update):
+        return _UpdateResult(0)
 
-        for resp in responses:
-            if isinstance(resp, Exception):
-                pytest.fail(f"Concurrent request raised exception: {resp}")
+    async def update_many(self, query, update):
+        return _UpdateResult(0)
 
-        r = requests.get(f"{API}/admin/partners", headers=_h(admin_token))
-        updated = next((p for p in r.json() if p.get("email") == PARTNER["email"]), None)
-        assert updated, "Partner not found"
-        final_balance = float(updated.get("balance", 0))
-        assert final_balance >= 0, f"Balance is negative: {final_balance}"
-        total_clicks = updated.get("total_clicks", 0)
-        assert total_clicks >= initial_clicks + 5, (
-            f"Expected at least {initial_clicks + 5} clicks, got {total_clicks}"
+
+class _FakeDB:
+    def __init__(self, *, balance, cpc=0.5, billing_mode="per_click", is_partner=True, default_cpc=0.5):
+        self.partner_profiles = _AtomicPartnerCollection({
+            "user_id": PARTNER_ID,
+            "billing_mode": billing_mode,
+            "balance": balance,
+            "default_cpc": default_cpc,
+            "total_clicks": 0,
+            "total_spent": 0.0,
+        })
+        self.jobs = _JobsCollection({
+            "_id": JOB_ID,
+            "partner_id": PARTNER_ID,
+            "is_partner": is_partner,
+            "external_url": "https://example.test/job",
+            "title": "Partner job",
+            "cpc": cpc,
+            "is_active": True,
+            "views_count": 0,
+        })
+        self.click_events = _EventsCollection()
+        self.campaigns = _NoopCollection()
+        self.users = _NoopCollection()
+        self.companies = _NoopCollection()
+
+
+def _install_import_stubs(monkeypatch):
+    fastapi = types.ModuleType("fastapi")
+    fastapi.APIRouter = _Router
+    fastapi.HTTPException = _HTTPException
+    fastapi.Depends = lambda dependency=None, *a, **k: dependency
+    fastapi.Query = lambda default=None, *a, **k: default
+    monkeypatch.setitem(sys.modules, "fastapi", fastapi)
+
+    pydantic = types.ModuleType("pydantic")
+    pydantic.BaseModel = _Model
+    monkeypatch.setitem(sys.modules, "pydantic", pydantic)
+
+    models = types.ModuleType("models")
+    for name in ("Job", "JobCreate", "JobUpdate", "JobResponse", "JobSearchQuery", "JobSearchResponse", "User"):
+        setattr(models, name, _Model)
+    models.UserType = _UserType
+    monkeypatch.setitem(sys.modules, "models", models)
+
+    database = types.ModuleType("database")
+
+    async def _placeholder_db():
+        raise AssertionError("test must replace get_database")
+
+    database.get_database = _placeholder_db
+    monkeypatch.setitem(sys.modules, "database", database)
+
+    auth = types.ModuleType("auth")
+
+    async def _auth_stub(*args, **kwargs):
+        return None
+
+    auth.get_current_active_user = _auth_stub
+    auth.require_employer = _auth_stub
+    monkeypatch.setitem(sys.modules, "auth", auth)
+
+    geo = types.ModuleType("geo_service")
+
+    async def _resolve(*args, **kwargs):
+        return []
+
+    async def _geocode(*args, **kwargs):
+        return None
+
+    geo.resolve_location_codes = _resolve
+    geo.geocode_place = _geocode
+    geo.postcode_regex = lambda code: code
+    monkeypatch.setitem(sys.modules, "geo_service", geo)
+
+
+@pytest.fixture
+def jobs_module(monkeypatch):
+    _install_import_stubs(monkeypatch)
+    spec = importlib.util.spec_from_file_location("routes_jobs_p0004", JOBS_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    async def _no_low_balance(*args, **kwargs):
+        return None
+
+    module._check_low_balance = _no_low_balance
+    module._HTTPException = _HTTPException
+    return module
+
+
+def _run(jobs_module, db, count=1):
+    async def scenario():
+        async def _get_database():
+            return db
+
+        jobs_module.get_database = _get_database
+        if count == 1:
+            return [await jobs_module.record_partner_click(JOB_ID)]
+        return await asyncio.gather(
+            *(jobs_module.record_partner_click(JOB_ID) for _ in range(count))
         )
 
+    return asyncio.run(scenario())
 
-# Need requests for sync calls in test methods
-import requests
+
+def _costs(db):
+    return sorted(float(event["cost"]) for event in db.click_events.records)
+
+
+def test_exact_balance_debit_is_atomic(jobs_module):
+    db = _FakeDB(balance=1.0, cpc=0.5)
+    responses = _run(jobs_module, db)
+
+    assert responses == [{"redirect_url": "https://example.test/job"}]
+    assert db.partner_profiles.profile["balance"] == pytest.approx(0.5)
+    assert db.partner_profiles.profile["total_spent"] == pytest.approx(0.5)
+    assert db.partner_profiles.profile["total_clicks"] == 1
+    assert _costs(db) == [0.5]
+    assert db.partner_profiles.atomic_filters == [
+        {"user_id": PARTNER_ID, "balance": {"$gte": 0.5}}
+    ]
+
+
+def test_insufficient_balance_is_not_debited_and_job_stops(jobs_module):
+    db = _FakeDB(balance=0.3, cpc=0.5)
+    _run(jobs_module, db)
+
+    assert db.partner_profiles.profile["balance"] == pytest.approx(0.3)
+    assert db.partner_profiles.profile["total_spent"] == pytest.approx(0.0)
+    assert db.partner_profiles.profile["total_clicks"] == 1
+    assert db.jobs.job["is_active"] is False
+    assert db.jobs.job["views_count"] == 1
+    assert len(db.click_events.records) == 1
+    assert db.click_events.records[0]["cost"] == 0.0
+    assert db.click_events.records[0]["stopped"] is True
+
+
+def test_cpc_zero_counts_click_without_debit(jobs_module):
+    db = _FakeDB(balance=1.0, cpc=0.0)
+    _run(jobs_module, db)
+
+    assert db.partner_profiles.profile["balance"] == pytest.approx(1.0)
+    assert db.partner_profiles.profile["total_spent"] == pytest.approx(0.0)
+    assert db.partner_profiles.profile["total_clicks"] == 1
+    assert db.jobs.job["is_active"] is True
+    assert _costs(db) == [0.0]
+    assert db.partner_profiles.atomic_filters == []
+
+
+def test_default_cpc_from_profile_is_preserved(jobs_module):
+    db = _FakeDB(balance=0.5, cpc=None, default_cpc=0.25)
+    _run(jobs_module, db)
+
+    assert db.partner_profiles.profile["balance"] == pytest.approx(0.25)
+    assert db.partner_profiles.profile["total_spent"] == pytest.approx(0.25)
+    assert db.partner_profiles.profile["total_clicks"] == 1
+    assert _costs(db) == [0.25]
+
+
+def test_non_partner_is_rejected_without_billing(jobs_module):
+    db = _FakeDB(balance=1.0, cpc=0.5, is_partner=False)
+
+    with pytest.raises(_HTTPException) as exc:
+        _run(jobs_module, db)
+
+    assert exc.value.status_code == 400
+    assert db.partner_profiles.profile["balance"] == pytest.approx(1.0)
+    assert db.partner_profiles.profile["total_clicks"] == 0
+    assert db.click_events.records == []
+
+
+def test_two_concurrent_clicks_with_balance_for_one_charge_exactly_once(jobs_module):
+    db = _FakeDB(balance=0.5, cpc=0.5)
+    _run(jobs_module, db, count=2)
+
+    assert db.partner_profiles.profile["balance"] == pytest.approx(0.0)
+    assert db.partner_profiles.profile["balance"] >= 0
+    assert db.partner_profiles.profile["total_spent"] == pytest.approx(0.5)
+    assert db.partner_profiles.profile["total_clicks"] == 2
+    assert _costs(db) == [0.0, 0.5]
+    assert sum(event["cost"] > 0 for event in db.click_events.records) == 1
+    assert len(db.partner_profiles.atomic_filters) == 2
+    assert all(f == {"user_id": PARTNER_ID, "balance": {"$gte": 0.5}}
+               for f in db.partner_profiles.atomic_filters)
+
+
+def test_five_concurrent_clicks_with_balance_for_two_charge_exactly_twice(jobs_module):
+    db = _FakeDB(balance=1.0, cpc=0.5)
+    _run(jobs_module, db, count=5)
+
+    assert db.partner_profiles.profile["balance"] == pytest.approx(0.0)
+    assert db.partner_profiles.profile["balance"] >= 0
+    assert db.partner_profiles.profile["total_spent"] == pytest.approx(1.0)
+    assert db.partner_profiles.profile["total_clicks"] == 5
+    assert _costs(db) == [0.0, 0.0, 0.0, 0.5, 0.5]
+    assert sum(event["cost"] > 0 for event in db.click_events.records) == 2
+    assert len(db.click_events.records) == 5
+    assert len(db.partner_profiles.atomic_filters) == 5
