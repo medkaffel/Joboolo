@@ -74,32 +74,10 @@ async def startup_db_client():
         await db.jobs.create_index([("loc", "2dsphere")])
     except Exception as e:
         logging.warning(f"Geo index creation failed: {e}")
-    # Seed database with sample data
-    try:
-        from seed_data import seed_database
-        await seed_database()
-    except Exception as e:
-        logging.warning(f"Database seeding failed: {e}")
-    # Seed default admin account (idempotent)
-    try:
-        from database import get_database
-        from auth import get_password_hash
-        from datetime import datetime
-        db = await get_database()
-        if not await db.users.find_one({"email": "admin@joboolo.fr"}):
-            await db.users.insert_one({
-                "_id": "admin_joboolo",
-                "email": "admin@joboolo.fr",
-                "first_name": "Admin", "last_name": "Joboolo",
-                "user_type": "admin",
-                "hashed_password": get_password_hash("AdminJoboolo2026!"),
-                "phone": None, "location": None, "bio": None, "skills": [], "experience_years": None,
-                "is_active": True, "is_verified": True,
-                "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
-            })
-            logging.info("Default admin account created")
-    except Exception as e:
-        logging.warning(f"Admin seeding failed: {e}")
+    # P0-002 : plus aucune création automatique de seed de démonstration ni de
+    # compte administrateur au démarrage. Le seed et la création d'un admin
+    # initial se font explicitement via des scripts dédiés (scripts/seed_dev.py,
+    # scripts/create_admin.py), jamais silencieusement et jamais en production.
     # Seed default footer international country links (idempotent)
     try:
         from database import get_database
