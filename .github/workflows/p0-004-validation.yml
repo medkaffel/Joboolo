@@ -19,8 +19,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install isolated test dependency
-        run: python -m pip install --upgrade pytest
+      - name: Install isolated test dependencies
+        run: python -m pip install --upgrade pytest pytest-xdist
 
       - name: Compile changed Python files
         run: |
