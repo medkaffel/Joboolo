@@ -203,11 +203,16 @@ async def _credit_if_paid(db, session_id: str):
                 },
             )
             if grant_result.modified_count == 1 or await _recruiter_grant_present(db, user_id, session_id):
-                await db.payment_transactions.update_one(
+                # P0-005 : un seul reçu. Sous appels réellement concurrents, les
+                # deux callers peuvent voir l'octroi confirmé (granted_sessions),
+                # mais seul celui qui fait passer `credited` de false->true
+                # (modified_count == 1) envoie le reçu.
+                credited_result = await db.payment_transactions.update_one(
                     {"session_id": session_id, "credited": {"$ne": True}},
                     {"$set": {"credited": True, "credited_at": datetime.now(timezone.utc)}},
                 )
-                await _send_recruiter_receipt(db, record)
+                if credited_result.modified_count == 1:
+                    await _send_recruiter_receipt(db, record)
         else:
             # posting_pack / partner_topup : logique existante inchangée (hors P0-005).
             res = await db.payment_transactions.update_one(

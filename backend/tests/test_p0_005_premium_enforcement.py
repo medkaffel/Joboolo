@@ -108,6 +108,11 @@ class _Collection:
         self._docs[job_id] = dict(fields) if fields else {"_id": job_id}
         return self
 
+    def remove_field(self, doc_id, field):
+        """Remove a field directly from the underlying storage (unlike get() which returns a copy)."""
+        self._docs.get(doc_id, {}).pop(field, None)
+        return self
+
     def get(self, doc_id):
         doc = self._docs.get(doc_id)
         return dict(doc) if doc is not None else None
@@ -513,10 +518,12 @@ def test_premium_one_credit_succeeds_and_decrements(jobs_module):
 
 def test_premium_missing_premium_credits_field_treated_as_zero(jobs_module):
     client = _FakeClient()
-    client.db.users.seed_user()  # no premium_credits key
-    client.db.users.get(USER_ID).pop("premium_credits", None)
+    client.db.users.seed_user()
+    client.db.users.remove_field(USER_ID, "premium_credits")
     client.db.companies.seed_job(COMPANY_ID, **{"_id": COMPANY_ID, "owner_id": USER_ID})
     user = _wire(jobs_module, client)
+
+    assert "premium_credits" not in client.db.users.get(USER_ID)
 
     with pytest.raises(_HTTPException) as exc:
         asyncio.run(jobs_module.create_job(_make_job_data(is_premium=True), user))
@@ -707,3 +714,27 @@ def test_recruiter_pack_grant_not_confirmed_leaves_uncredited(payments_module):
     assert client.db.payment_transactions.get("cs_123")["credited"] is False
     user = client.db.users.get(USER_ID)
     assert user["premium_credits"] == 0
+
+
+def test_recruiter_pack_concurrent_calls_exactly_one_receipt(payments_module):
+    """Under truly concurrent _credit_if_paid calls (asyncio.gather), exactly
+    one receipt must be sent — the winner of the credited false->true transition."""
+    client = _FakeClient()
+    _seed_recruiter_transaction(client, postings=5)
+    ctx = _PaymentsContext(payments_module, client)
+    ctx.patch_receipt()
+
+    async def scenario():
+        return await asyncio.gather(
+            _credit(payments_module, client, "cs_123"),
+            _credit(payments_module, client, "cs_123"),
+        )
+
+    r1, r2 = asyncio.run(scenario())
+
+    assert r1.get("credited") is True
+    assert r2.get("credited") is True
+    user = client.db.users.get(USER_ID)
+    assert user["premium_credits"] == 5
+    assert user["granted_sessions"].count("cs_123") == 1
+    assert ctx.calls == 1  # exactly one receipt under concurrency
