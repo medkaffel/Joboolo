@@ -181,31 +181,66 @@ async def _credit_if_paid(db, session_id: str):
 
     # Credit exactly once
     if record.get("payment_status") == "paid" and not record.get("credited"):
-        res = await db.payment_transactions.update_one(
-            {"session_id": session_id, "credited": {"$ne": True}},
-            {"$set": {"credited": True, "credited_at": datetime.now(timezone.utc)}},
-        )
-        if res.modified_count == 1:
-            if record.get("kind") == "recruiter_pack" and record.get("user_id"):
-                await db.users.update_one(
-                    {"_id": record["user_id"]},
-                    {"$inc": {"premium_credits": int(record.get("postings") or 0)}},
+        if record.get("kind") == "recruiter_pack":
+            # P0-005 : grant idempotent pour le recruiter_pack uniquement.
+            # L'octroi et le marqueur d'idempotence (granted_sessions) sont faits
+            # atomiquement sur le document utilisateur : le filtre exclut le
+            # session_id déjà accordé, donc un retry/webhook concurrent ne peut
+            # jamais incrémenter deux fois. `credited=True` n'est posé qu'après
+            # l'octroi confirmé (ou la confirmation qu'il est déjà accordé).
+            # Si l'utilisateur est absent ou l'octroi non confirmé, on laisse
+            # credited != True pour permettre un retry.
+            user_id = record.get("user_id")
+            credited_amount = int(record.get("postings") or 0)
+            grant_result = await db.users.update_one(
+                {
+                    "_id": user_id,
+                    "granted_sessions": {"$ne": session_id},
+                },
+                {
+                    "$inc": {"premium_credits": credited_amount},
+                    "$addToSet": {"granted_sessions": session_id},
+                },
+            )
+            if grant_result.modified_count == 1 or await _recruiter_grant_present(db, user_id, session_id):
+                await db.payment_transactions.update_one(
+                    {"session_id": session_id, "credited": {"$ne": True}},
+                    {"$set": {"credited": True, "credited_at": datetime.now(timezone.utc)}},
                 )
                 await _send_recruiter_receipt(db, record)
-            elif record.get("kind") == "posting_pack" and record.get("postings"):
-                await db.partner_profiles.update_one(
-                    {"user_id": record["partner_id"]},
-                    {"$inc": {"postings_remaining": int(record["postings"])}},
-                )
-                await _send_receipt(db, record)
-            else:
-                await db.partner_profiles.update_one(
-                    {"user_id": record["partner_id"]},
-                    {"$inc": {"balance": float(record["amount"])}, "$set": {"low_balance_notified": False}},
-                )
-                await _send_receipt(db, record)
+        else:
+            # posting_pack / partner_topup : logique existante inchangée (hors P0-005).
+            res = await db.payment_transactions.update_one(
+                {"session_id": session_id, "credited": {"$ne": True}},
+                {"$set": {"credited": True, "credited_at": datetime.now(timezone.utc)}},
+            )
+            if res.modified_count == 1:
+                if record.get("kind") == "posting_pack" and record.get("postings"):
+                    await db.partner_profiles.update_one(
+                        {"user_id": record["partner_id"]},
+                        {"$inc": {"postings_remaining": int(record["postings"])}},
+                    )
+                    await _send_receipt(db, record)
+                else:
+                    await db.partner_profiles.update_one(
+                        {"user_id": record["partner_id"]},
+                        {"$inc": {"balance": float(record["amount"])}, "$set": {"low_balance_notified": False}},
+                    )
+                    await _send_receipt(db, record)
         record = await db.payment_transactions.find_one({"session_id": session_id})
     return record
+
+
+async def _recruiter_grant_present(db, user_id, session_id) -> bool:
+    """Confirme que le session_id est déjà présent dans granted_sessions de l'utilisateur
+    (cas retry après crash entre l'octroi et le marquage credited=True)."""
+    if not user_id:
+        return False
+    user = await db.users.find_one(
+        {"_id": user_id, "granted_sessions": session_id},
+        {"_id": 1},
+    )
+    return user is not None
 
 
 async def _send_recruiter_receipt(db, record: dict):

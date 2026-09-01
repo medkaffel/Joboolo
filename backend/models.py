@@ -146,7 +146,7 @@ class JobBase(BaseModel):
     tags: List[str] = []
 
 class JobCreate(JobBase):
-    pass
+    is_premium: bool = False  # P0-005 : offre Premium payante (consomme 1 crédit) sinon standard gratuite
 
 class JobUpdate(BaseModel):
     title: Optional[str] = None
@@ -164,6 +164,8 @@ class JobUpdate(BaseModel):
 class Job(BaseDocument, JobBase):
     employer_id: str  # User ID who posted the job
     is_active: bool = True
+    is_premium: bool = False  # P0-005 : offre Premium (consommé 1 crédit recruteur)
+    premium_granted_at: Optional[datetime] = None  # P0-005 : traçabilité de l'octroi premium
     views_count: int = 0
     applications_count: int = 0
 
@@ -183,6 +185,7 @@ class JobResponse(BaseModel):
     benefits: List[str]
     tags: List[str]
     is_active: bool
+    is_premium: bool = False  # P0-005
     views_count: int
     applications_count: int
     created_at: datetime

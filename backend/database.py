@@ -12,6 +12,10 @@ db_instance = Database()
 async def get_database():
     return db_instance.database
 
+def get_client() -> Optional[AsyncIOMotorClient]:
+    """Retourne le client Mongo sous-jacent (pour ouvrir des sessions/transactions)."""
+    return db_instance.client
+
 async def connect_to_mongo():
     """Create database connection"""
     mongo_url = os.environ.get('MONGO_URL')
