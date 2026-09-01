@@ -21,7 +21,8 @@ import config  # noqa: E402
 # Seules ces variables sont manipulées par les tests : elles sont sauvegardées
 # et restaurées ciblées pour ne jamais altérer l'environnement du process pytest
 # (ex. PYTEST_CURRENT_TEST / PYTEST_XDIST_WORKER gérés par pytest lui-même).
-_CONFIG_ENV_VARS = ("APP_ENV", "SECRET_KEY", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET")
+_CONFIG_ENV_VARS = ("APP_ENV", "SECRET_KEY", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+                    "FRONTEND_URL")
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +136,24 @@ class TestValidateStartupConfig:
         )
         settings = config.validate_startup_config()
         assert settings.STRIPE_WEBHOOK_SECRET == "whsec_live"
+
+
+class TestFrontendUrlCanonical:
+    def test_default_matches_historical_scheduler_value(self, monkeypatch):
+        _set_env(FRONTEND_URL=None)
+        assert config.get_frontend_url() == "https://job-platform-next.preview.emergentagent.com"
+
+    def test_override_used(self, monkeypatch):
+        _set_env(FRONTEND_URL="https://joboolo.fr")
+        assert config.get_frontend_url() == "https://joboolo.fr"
+
+    def test_empty_override_falls_back(self, monkeypatch):
+        _set_env(FRONTEND_URL="")
+        assert config.get_frontend_url() == "https://job-platform-next.preview.emergentagent.com"
+
+    def test_whitespace_override_stripped(self, monkeypatch):
+        _set_env(FRONTEND_URL="  https://joboolo.fr/jobs  ")
+        assert config.get_frontend_url() == "https://joboolo.fr/jobs"
 
 
 class TestNoSecretsInErrors:

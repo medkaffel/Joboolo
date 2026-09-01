@@ -77,8 +77,17 @@ async def subscribe_alert(data: AlertSubscribe):
 
 @router.get("/track/{alert_id}")
 async def track_alert_click(alert_id: str, redirect: str = ""):
-    """Record an alert open/click (for billing & open-tracking) then redirect."""
+    """Record an alert open/click (for billing & open-tracking) then redirect.
+
+    P0-008 : la destination n'est jamais utilisée telle quelle. `safe_redirect`
+    n'autorise que les destinations internes sûres (relatives commençant par un
+    seul '/') ou les absolues dont l'origine est EXACTEMENT celle de l'APP_URL
+    canonique ; toute autre destination tombe sur '/'. L'origine autorisée vient
+    de la config (FRONTEND_URL / APP_URL), jamais du Host de la requête.
+    """
     from fastapi.responses import RedirectResponse
+    from scheduler import APP_URL
+    from safe_urls import safe_redirect
     db = await get_database()
     now = datetime.utcnow()
     alert = await db.alerts.find_one({"_id": alert_id})
@@ -86,7 +95,7 @@ async def track_alert_click(alert_id: str, redirect: str = ""):
         await db.alerts.update_one({"_id": alert_id}, {"$set": {"last_viewed_at": now}, "$inc": {"click_count": 1}})
         if alert.get("user_id"):
             await db.users.update_one({"_id": alert["user_id"]}, {"$set": {"last_alert_viewed_at": now}})
-    target = redirect or "/"
+    target = safe_redirect(redirect, APP_URL)
     return RedirectResponse(url=target, status_code=302)
 
 

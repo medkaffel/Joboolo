@@ -17,6 +17,10 @@ from pathlib import Path
 import pytest
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+if str(BACKEND_DIR) not in sys.path:
+    # scheduler.py importe `config` (module local du backend) : nécessite le
+    # backend sur le path même quand pytest est lancé depuis un autre cwd.
+    sys.path.insert(0, str(BACKEND_DIR))
 
 
 def _install_scheduler_stubs(monkeypatch):
