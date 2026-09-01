@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import get_database
 from email_service import build_alert_html, send_alert_email
+from campaign_lifecycle import fetch_public_job_filter, is_campaign_diffusible
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +15,20 @@ scheduler = AsyncIOScheduler()
 APP_URL = os.environ.get("FRONTEND_URL", "https://job-platform-next.preview.emergentagent.com")
 
 
-def _build_job_query(alert: dict, since: datetime) -> dict:
-    query = {"is_active": True, "created_at": {"$gt": since}}
+def _build_job_query(alert: dict, since: datetime, public_filter: dict) -> dict:
+    """Compose les critères de l'alerte sans JAMAIS écraser le filtre de
+    visibilité public (public_filter). Le `$or` de search (et toute clause
+    utilisateur) est placé dans le tableau `$and` existant : la visibilité
+    publique ET les critères de l'alerte doivent tous deux s'appliquer (pas de
+    ré-exposition des campagnes cachées)."""
+    query = {**public_filter, "created_at": {"$gt": since}}
+    and_clauses = []
     if alert.get("search"):
         s = alert["search"]
-        query["$or"] = [
+        and_clauses.append({"$or": [
             {"title": {"$regex": s, "$options": "i"}},
             {"description": {"$regex": s, "$options": "i"}},
-        ]
+        ]})
     if alert.get("location"):
         query["location"] = {"$regex": alert["location"], "$options": "i"}
     if alert.get("job_type"):
@@ -30,6 +37,9 @@ def _build_job_query(alert: dict, since: datetime) -> dict:
         query["is_remote"] = alert["is_remote"]
     if alert.get("salary_min"):
         query["salary_min"] = {"$gte": alert["salary_min"]}
+    if and_clauses:
+        # Ne pas écraser le $and de visibilité fourni par public_filter.
+        query["$and"] = list(query.get("$and", [])) + and_clauses
     return query
 
 
@@ -60,7 +70,7 @@ async def process_alerts():
         else:
             since = now - window
 
-        query = _build_job_query(alert, since)
+        query = _build_job_query(alert, since, await fetch_public_job_filter(db, now))
         jobs = await db.jobs.find(query).sort([("created_at", -1)]).limit(10).to_list(length=10)
 
         if not jobs:
@@ -99,6 +109,10 @@ async def refresh_campaign_feeds():
     from email_service import build_auto_import_email, send_alert_email
     auto_email = bool(settings.get("auto_import_email", True))
     for camp in campaigns:
+        # P0-006 : une campagne paused/future/expirée/budget épuisé n'est pas
+        # diffusible => on saute son import auto sans rien réimporter.
+        if not is_campaign_diffusible(camp, now):
+            continue
         last = camp.get("last_import_at")
         if isinstance(last, str):
             try:

@@ -203,7 +203,9 @@ async def send_alert_now(
         raise HTTPException(status_code=404, detail="Alerte introuvable")
 
     since = datetime.utcnow() - timedelta(days=30)
-    query = _build_job_query(alert, since)
+    from campaign_lifecycle import fetch_public_job_filter
+    public_filter = await fetch_public_job_filter(db, datetime.utcnow())
+    query = _build_job_query(alert, since, public_filter)
     jobs = await db.jobs.find(query).sort([("created_at", -1)]).limit(10).to_list(length=10)
 
     if not jobs:
