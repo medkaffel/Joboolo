@@ -133,6 +133,20 @@ def reset_settings() -> None:
     _settings = None
 
 
+def ensure_seeding_allowed() -> None:
+    """Garde anti-production pour toute opération de seed / création de démo.
+
+    P0-002 : refus explicite de renseigner la base avec des comptes/offres/
+    entreprises de démonstration lorsque l'environnement est 'production'.
+    Appelée AVANT toute écriture DB. Ne divulgue aucun secret.
+    """
+    if get_settings().is_production:
+        raise ConfigurationError(
+            "Le seed de données de démonstration est interdit en environnement "
+            "production. Aucune donnée de démonstration ne doit être créée en production."
+        )
+
+
 def validate_startup_config() -> Settings:
     """Fail-fast au démarrage. Appelé par server.py AVANT seed/scheduler.
 

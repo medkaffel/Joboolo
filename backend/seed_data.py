@@ -1,6 +1,7 @@
 from database import get_database
 from models import Job, Company, User, UserType, JobType
 from auth import get_password_hash
+from config import ensure_seeding_allowed
 import asyncio
 from datetime import datetime, timedelta
 import uuid
@@ -436,7 +437,8 @@ async def seed_jobs():
     print(f"Seeded/ensured {len(jobs_data)} jobs")
 
 async def seed_database():
-    """Seed all data"""
+    """Seed all data (explicit dev/test only; refused in production)."""
+    ensure_seeding_allowed()
     print("Starting database seeding...")
     await seed_companies()
     await seed_users()
