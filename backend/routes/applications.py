@@ -7,6 +7,7 @@ from models import (
 from database import get_database
 from auth import get_current_active_user, require_employer
 from datetime import datetime
+from campaign_lifecycle import is_job_publicly_visible, get_job_campaign
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -76,12 +77,9 @@ async def apply_to_job(
     
     db = await get_database()
     
-    # Check if job exists and is active
-    job = await db.jobs.find_one({
-        "_id": application_data.job_id,
-        "is_active": True
-    })
-    if not job:
+    # Check if job exists and is publicly visible (P0-006)
+    job = await db.jobs.find_one({"_id": application_data.job_id})
+    if not job or not is_job_publicly_visible(job, await get_job_campaign(db, job)):
         raise HTTPException(
             status_code=404,
             detail="Job not found or no longer active"

@@ -35,34 +35,73 @@ def jobs_module(monkeypatch):
 
 
 def _run(module, db, count):
+    """Exécute les clics en concurrence et collecte les issues ("ok"/"err").
+
+    Depuis P0-006, un appel qui observe `is_active=False` (job arrêté pour
+    solde CPC insuffisant) ou une campagne non diffusible retourne 404 — on le
+    collecte au lieu de le laisser échouer la collecte. Les clics déjà admis
+    avant l'arrêt se terminent normalement."""
     async def scenario():
         async def _get_database():
             return db
 
         module.get_database = _get_database
-        return await asyncio.gather(
-            *(module.record_partner_click(base.JOB_ID) for _ in range(count))
-        )
 
-    return asyncio.run(scenario())
+        async def _one():
+            try:
+                return ("ok", await module.record_partner_click(base.JOB_ID))
+            except base._HTTPException as e:
+                return ("err", e)
+
+        return await asyncio.gather(*(_one() for _ in range(count)))
+
+    results = asyncio.run(scenario())
+    db.__results = results
+    return results
+
+
+def _split_results(db):
+    """Sépare les issues collectées : liste de redirects et liste de 404."""
+    results = getattr(db, "__results", [])
+    redirects = [r for r in results if r[0] == "ok"]
+    errors = [r for r in results if r[0] == "err"]
+    assert all(e[1].status_code == 404 for e in errors), "seul un 404 est attendu"
+    return redirects, errors
 
 
 def _assert_batch(db, *, requests, cpc, expected_charged, initial_balance):
+    """Invariants d'atomicité CPC sous le contrat P0-006 :
+    - balance jamais négative, montant débité exact selon les crédits dispo ;
+    - nombre de débits positifs exact, aucun double débit ;
+    - chaque 404 ne produit ni débit ni event ni view supplémentaire ;
+    - au moins un clic insuffisant arrête le job et est compté.
+    """
     profile = db.partner_profiles.profile
-    expected_balance = initial_balance - (expected_charged * cpc)
 
-    assert profile["balance"] == pytest.approx(expected_balance)
+    redirects, errors = _split_results(db)
+
+    charged = sum(float(ev["cost"]) for ev in db.click_events.records if float(ev["cost"]) > 0)
+
     assert profile["balance"] >= -1e-12
+    assert profile["balance"] == pytest.approx(initial_balance - charged)
     assert profile["total_spent"] == pytest.approx(expected_charged * cpc)
-    assert profile["total_clicks"] == requests
-    assert len(db.click_events.records) == requests
-    assert db.jobs.job["views_count"] == requests
 
-    paid = [event for event in db.click_events.records if float(event["cost"]) > 0]
-    free = [event for event in db.click_events.records if float(event["cost"]) == 0]
+    # chaque redirect = 1 clic compté + 1 event + 1 view ; chaque 404 rien.
+    assert profile["total_clicks"] == len(redirects)
+    assert len(db.click_events.records) == len(redirects)
+    assert db.jobs.job["views_count"] == len(redirects)
+
+    paid = [ev for ev in db.click_events.records if float(ev["cost"]) > 0]
+    free = [ev for ev in db.click_events.records if float(ev["cost"]) == 0]
     assert len(paid) == expected_charged
-    assert len(free) == requests - expected_charged
-    assert all(float(event["cost"]) == pytest.approx(cpc) for event in paid)
+    assert len(free) == len(redirects) - expected_charged
+    assert all(float(ev["cost"]) == pytest.approx(cpc) for ev in paid)
+    # aucun double débit : montant exact au total
+    assert sum(float(ev["cost"]) for ev in paid) == pytest.approx(expected_charged * cpc)
+
+    # au moins un clic insuffisant a arrêté le job.
+    if expected_charged < requests:
+        assert db.jobs.job["is_active"] is False
 
 
 @pytest.mark.parametrize(
@@ -79,9 +118,11 @@ def _assert_batch(db, *, requests, cpc, expected_charged, initial_balance):
 )
 def test_concurrency_matrix_never_overspends(jobs_module, balance, cpc, requests, expected_charged):
     db = base._FakeDB(balance=balance, cpc=cpc)
-    responses = _run(jobs_module, db, requests)
+    _run(jobs_module, db, requests)
 
-    assert all(response == {"redirect_url": "https://example.test/job"} for response in responses)
+    # chaque redirect est un succès ; les 404 (job arrêté) sont collectés.
+    redirects, _ = _split_results(db)
+    assert all(r[1] == {"redirect_url": "https://example.test/job"} for r in redirects)
     _assert_batch(
         db,
         requests=requests,
@@ -90,7 +131,9 @@ def test_concurrency_matrix_never_overspends(jobs_module, balance, cpc, requests
         initial_balance=balance,
     )
 
-    assert len(db.partner_profiles.atomic_filters) == requests
+    # Chaque tentative de débit a bien filtré atomiquement `balance >= cpc`.
+    redirects, errors = _split_results(db)
+    assert len(db.partner_profiles.atomic_filters) == len(redirects)
     assert all(
         f == {"user_id": base.PARTNER_ID, "balance": {"$gte": cpc}}
         for f in db.partner_profiles.atomic_filters
@@ -113,19 +156,27 @@ def test_large_batch_100_clicks_charges_only_available_balance(jobs_module):
 def test_repeated_concurrent_batches_do_not_reopen_spend_window(jobs_module):
     db = base._FakeDB(balance=2.0, cpc=0.5)
 
-    _run(jobs_module, db, 7)
-    _run(jobs_module, db, 7)
-    _run(jobs_module, db, 7)
+    r1 = _run(jobs_module, db, 7)
+    r2 = _run(jobs_module, db, 7)
+    r3 = _run(jobs_module, db, 7)
 
     profile = db.partner_profiles.profile
+    # Le premier batch a consommé exactement ce que permettait le solde (4 débits
+    # pour 2.0/0.5), puis le job est arrêté. Les batchs suivants ne rouvrent
+    # jamais la fenêtre de dépense : tout est 404, aucun débit/event/view.
+    first_redirects = [r for r in r1 if r[0] == "ok"]
+    assert len(first_redirects) >= 4
+    assert all(r[0] == "err" for r in r2 + r3), "après arrêt, plus aucun clic admis"
+
     assert profile["balance"] == pytest.approx(0.0)
     assert profile["balance"] >= 0
     assert profile["total_spent"] == pytest.approx(2.0)
-    assert profile["total_clicks"] == 21
-    assert len(db.click_events.records) == 21
-    assert sum(float(event["cost"]) > 0 for event in db.click_events.records) == 4
-    assert sum(float(event["cost"]) == 0 for event in db.click_events.records) == 17
-    assert db.jobs.job["views_count"] == 21
+    assert profile["total_clicks"] == len(first_redirects)
+    assert len(db.click_events.records) == len(first_redirects)
+    assert sum(float(ev["cost"]) > 0 for ev in db.click_events.records) == 4
+    assert sum(float(ev["cost"]) == 0 for ev in db.click_events.records) == len(first_redirects) - 4
+    assert db.jobs.job["views_count"] == len(first_redirects)
+    assert db.jobs.job["is_active"] is False
 
 
 def test_stale_high_balance_read_cannot_force_extra_charge(jobs_module):
