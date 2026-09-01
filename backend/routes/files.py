@@ -2,14 +2,12 @@ import uuid
 import asyncio
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Header, Query
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from database import get_database
-from auth import get_current_active_user, get_user_by_email, get_secret_key
-from jose import jwt, JWTError
-from auth import ALGORITHM
+from auth import get_current_active_user
 from models import User
 from storage import put_object, get_object, APP_NAME
 
@@ -246,24 +244,6 @@ async def upload_cv(
     }
 
 
-async def _resolve_user(authorization: str, auth: str):
-    token = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ", 1)[1]
-    elif auth:
-        token = auth
-    if not token:
-        return None
-    try:
-        payload = jwt.decode(token, get_secret_key(), algorithms=[ALGORITHM])
-        email = payload.get("sub")
-    except JWTError:
-        return None
-    if not email:
-        return None
-    return await get_user_by_email(email)
-
-
 @router.get("/public/{path:path}")
 async def public_file(path: str):
     """Serve a public asset (e.g. partner/campaign logos) without authentication."""
@@ -283,28 +263,81 @@ async def public_file(path: str):
 
 
 
+async def _resolve_document(db, path: str):
+    """Resolve a stored document by storage_path across collections.
+
+    Search order: files, then candidate_documents. Resolution alone never grants
+    access: authorization is enforced separately via _authorize_document.
+    """
+    record = await db.files.find_one({"storage_path": path, "is_deleted": False})
+    if record:
+        return record
+    return await db.candidate_documents.find_one({"storage_path": path, "is_deleted": False})
+
+
+async def _authorize_document(db, record: dict, requester: User, path: str):
+    """Decide whether the requester may access the resolved document record.
+
+    P0-003 ACL — no implicit rule on user_type alone; every grant must be an
+    explicit backend decision:
+      - owner candidate: record.owner_id == requester.id
+      - admin: requester.user_type == admin (explicit read policy)
+      - employer: only if an application references exactly this path
+        (application.cv_url == path) AND the related job belongs to requester.
+    """
+    requester_id = str(getattr(requester, "id", ""))
+    requester_type = None
+    raw_type = getattr(requester, "user_type", None)
+    if raw_type is not None:
+        requester_type = raw_type.value if hasattr(raw_type, "value") else str(raw_type)
+
+    if requester_type == "admin":
+        return True
+
+    owner_id = str(record.get("owner_id", ""))
+    if owner_id and owner_id == requester_id:
+        return True
+
+    if requester_type == "employer":
+        application = await db.applications.find_one({"cv_url": path})
+        if not application:
+            return False
+        job = await db.jobs.find_one({"_id": application.get("job_id", "")})
+        if not job:
+            return False
+        return str(job.get("employer_id", "")) == requester_id
+
+    return False
+
+
 @router.get("/{path:path}")
 async def download_file(
     path: str,
-    authorization: str = Header(None),
-    auth: str = Query(None),
+    current_user: User = Depends(get_current_active_user),
 ):
-    """Download a stored file. Any authenticated user may download (candidate/employer)."""
-    user = await _resolve_user(authorization, auth)
-    if not user:
-        raise HTTPException(status_code=401, detail="Authentification requise")
+    """Download a stored private document, subject to backend ACL (P0-003).
+
+    Only Authorization: Bearer is accepted (no auth query-param). Access is
+    granted to the owner candidate, to an explicit admin, or to an employer
+    whose application references exactly this path on one of his own jobs.
+    """
+    if any(part in ("..", ".", "") or not part for part in path.split("/")) or ".." in path:
+        raise HTTPException(status_code=400, detail="Chemin de fichier invalide")
 
     db = await get_database()
-    record = await db.files.find_one({"storage_path": path, "is_deleted": False})
+    record = await _resolve_document(db, path)
     if not record:
         raise HTTPException(status_code=404, detail="Fichier introuvable")
+
+    if not await _authorize_document(db, record, current_user, path):
+        raise HTTPException(status_code=403, detail="Accès refusé à ce document")
 
     try:
         content, content_type = await asyncio.to_thread(get_object, path)
     except Exception:
         raise HTTPException(status_code=404, detail="Fichier introuvable dans le stockage")
 
-    filename = record.get("original_filename", "cv")
+    filename = record.get("original_filename", "document")
     return Response(
         content=content,
         media_type=record.get("content_type", content_type),
