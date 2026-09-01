@@ -131,8 +131,8 @@ jobs:
           NO_COLOR=1 opencode run \
             --agent plan \
             --model "$MODEL" \
-            --file /tmp/opencode-prompt.txt \
-            "Read the attached task context and execute it exactly." | tee /tmp/opencode-output.txt
+            "Read the attached task context and execute it exactly." \
+            --file=/tmp/opencode-prompt.txt | tee /tmp/opencode-output.txt
 
       - name: Run OpenCode build
         if: steps.context.outputs.mode == 'build'
@@ -142,8 +142,8 @@ jobs:
           NO_COLOR=1 opencode run \
             --agent build \
             --model "$MODEL" \
-            --file /tmp/opencode-prompt.txt \
-            "Read the attached task context and execute it exactly." | tee /tmp/opencode-output.txt
+            "Read the attached task context and execute it exactly." \
+            --file=/tmp/opencode-prompt.txt | tee /tmp/opencode-output.txt
 
       - name: Publish plan response
         if: steps.context.outputs.mode == 'plan'
