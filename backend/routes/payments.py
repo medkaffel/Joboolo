@@ -500,6 +500,53 @@ class CampaignImport(BaseModel):
     xml_content: Optional[str] = None
 
 
+def _validate_campaign_dates(start_date, end_date):
+    """P0-006 : valide les bornes de date d'une campagne.
+
+    - format strict 'YYYY-MM-DD' + vraie date calendrier (sinon 400) ;
+    - état final fusionné : start_date <= end_date (sinon 400) ;
+    - une valeur None ou '' ('' = suppression de la borne) n'impose aucune
+      contrainte. Une date non vide mais invalide => 400.
+    """
+    def _check(value, label):
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            return None
+        s = value.strip()
+        try:
+            d = datetime.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} invalide : format attendu YYYY-MM-DD avec une date calendrier réelle.",
+            )
+        if s != d.strftime("%Y-%m-%d"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} invalide : format attendu YYYY-MM-DD.",
+            )
+        return d
+
+    start = _check(start_date, "start_date")
+    end = _check(end_date, "end_date")
+    if start is not None and end is not None and start > end:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date doit être inférieure ou égale à end_date.",
+        )
+
+
+def _validate_campaign_status(status):
+    if status is None:
+        return
+    if status not in ("active", "paused"):
+        raise HTTPException(
+            status_code=400,
+            detail="status doit être 'active' ou 'paused'.",
+        )
+
+
 def _campaign_out(d: dict) -> dict:
     return {
         "id": d["_id"], "name": d.get("name"), "billing_mode": d.get("billing_mode"),
@@ -527,6 +574,7 @@ async def create_campaign(data: CampaignCreate, user: User = Depends(require_par
     from routes.admin import get_settings
     if not (data.xml_feed_url or "").strip():
         raise HTTPException(status_code=400, detail="L'URL du flux XML est obligatoire")
+    _validate_campaign_dates(data.start_date, data.end_date)
     settings = await get_settings(db)
     now = datetime.now(timezone.utc)
     validity = settings["pack_validity_days"] if data.billing_mode == "per_posting" else None
@@ -558,6 +606,12 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, user: User = D
     if not camp:
         raise HTTPException(status_code=404, detail="Campagne introuvable")
     fields = {k: v for k, v in data.dict().items() if v is not None}
+    _validate_campaign_status(fields.get("status"))
+    # P0-006 : valide chaque borne envoyée ET l'état final fusionné avec l'autre
+    # borne déjà stockée (update partielle).
+    new_start = fields.get("start_date") if "start_date" in fields else camp.get("start_date")
+    new_end = fields.get("end_date") if "end_date" in fields else camp.get("end_date")
+    _validate_campaign_dates(new_start, new_end)
     fields["updated_at"] = datetime.now(timezone.utc)
     await db.campaigns.update_one({"_id": campaign_id}, {"$set": fields})
     return _campaign_out(await db.campaigns.find_one({"_id": campaign_id}))

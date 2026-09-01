@@ -5,6 +5,9 @@ from database import get_database
 from auth import get_current_active_user
 from models import User, UserType
 from routes.jobs import populate_job_response
+from campaign_lifecycle import (
+    is_job_publicly_visible, get_job_campaign, fetch_public_job_filter,
+)
 import ai_service
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -50,7 +53,8 @@ async def recommendations(current_user: User = Depends(get_current_active_user))
     profile_complete = bool(skills or bio or user_doc.get("experience_years"))
 
     applied = await db.applications.distinct("job_id", {"candidate_id": current_user.id})
-    query = {"is_active": True}
+    # P0-006 : recommandations limitées aux offres publiquement visibles.
+    query = await fetch_public_job_filter(db)
     if applied:
         query["_id"] = {"$nin": applied}
     jobs = await db.jobs.find(query).sort([("created_at", -1)]).limit(60).to_list(length=60)
@@ -98,7 +102,8 @@ async def match_job(job_id: str, current_user: User = Depends(get_current_active
         raise HTTPException(status_code=403, detail="Réservé aux candidats")
     db = await get_database()
     job = await db.jobs.find_one({"_id": job_id})
-    if not job:
+    # P0-006 : refuser l'analyse IA d'une offre non publiquement visible.
+    if not job or not is_job_publicly_visible(job, await get_job_campaign(db, job)):
         raise HTTPException(status_code=404, detail="Offre introuvable")
     user_doc = await db.users.find_one({"_id": current_user.id}) or {}
     profile = ai_service.build_profile(user_doc)
