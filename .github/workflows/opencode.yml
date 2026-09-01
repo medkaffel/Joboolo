@@ -92,9 +92,9 @@ jobs:
             if [ "$MODE" = "plan" ]; then
               echo "MODE: PLAN ONLY. Read and analyze the repository. Do not modify files, commit, push, or create a PR. Return a concrete implementation plan and blockers."
             elif [ "$IS_PR" = "true" ]; then
-              echo "MODE: BUILD CORRECTION ON EXISTING PR. The workflow checks out the PR head branch. Apply only the requested corrections, update/add tests, and leave the working tree ready to commit. Do not create another branch or PR and do not push yourself."
+              echo "MODE: BUILD CORRECTION ON EXISTING PR. The workflow checks out the PR head branch. Apply only the requested corrections, update/add tests, and leave the working tree ready to commit. Do not create another branch or PR and do not push yourself. Stay inside the repository; do not inspect /etc, install system packages, or start external services. If real-service validation is requested, implement the tests/workflow support and let CI/ChatGPT run that validation separately."
             else
-              echo "MODE: BUILD. Implement only the requested issue scope, add/update tests, and leave the working tree with the requested changes. Do not push or create a PR yourself; the workflow handles the branch and ChatGPT creates/reviews the PR."
+              echo "MODE: BUILD. Implement only the requested issue scope, add/update tests, and leave the working tree with the requested changes. Do not push or create a PR yourself; the workflow handles the branch and ChatGPT creates/reviews the PR. Stay inside the repository; do not inspect /etc or install system packages."
             fi
           } > /tmp/opencode-prompt.txt
 
@@ -161,26 +161,37 @@ jobs:
           git config user.email "opencode-agent[bot]@users.noreply.github.com"
 
           if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
-            gh issue comment "${{ steps.context.outputs.issue_number }}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body-file /tmp/opencode-output.txt
+            cat /tmp/opencode-output.txt
+            if [ "${{ steps.context.outputs.is_pr }}" = "true" ]; then
+              echo "No repository changes produced for existing PR ${{ steps.context.outputs.issue_number }}."
+            else
+              gh issue comment "${{ steps.context.outputs.issue_number }}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --body-file /tmp/opencode-output.txt
+            fi
             exit 0
           fi
 
           git add -A
-          git commit -m "fix: issue #${{ steps.context.outputs.issue_number }} via OpenCode"
+          if [ "${{ steps.context.outputs.is_pr }}" = "true" ]; then
+            git commit -m "fix: update PR #${{ steps.context.outputs.issue_number }} via OpenCode"
+          else
+            git commit -m "fix: issue #${{ steps.context.outputs.issue_number }} via OpenCode"
+          fi
           git push --set-upstream origin "$BRANCH"
 
-          {
+          if [ "${{ steps.context.outputs.is_pr }}" = "true" ]; then
             cat /tmp/opencode-output.txt
             echo
-            if [ "${{ steps.context.outputs.is_pr }}" = "true" ]; then
-              echo "Existing PR branch updated for ChatGPT review: $BRANCH"
-            else
+            echo "Existing PR branch updated for ChatGPT review: $BRANCH"
+          else
+            {
+              cat /tmp/opencode-output.txt
+              echo
               echo "Branch ready for ChatGPT PR creation/review: $BRANCH"
-            fi
-          } > /tmp/opencode-build-comment.txt
+            } > /tmp/opencode-build-comment.txt
 
-          gh issue comment "${{ steps.context.outputs.issue_number }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --body-file /tmp/opencode-build-comment.txt
+            gh issue comment "${{ steps.context.outputs.issue_number }}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file /tmp/opencode-build-comment.txt
+          fi
