@@ -12,6 +12,7 @@ from database import get_database
 from auth import get_current_active_user, require_employer
 from models import User
 from email_service import send_alert_email
+from config import get_settings
 
 router = APIRouter(tags=["recruiter"])
 
@@ -42,7 +43,14 @@ def _build_packs(unit: float) -> dict:
 
 
 def _ensure_stripe():
-    stripe.api_key = os.environ.get("STRIPE_SECRET_KEY") or stripe.api_key or "sk_test_emergent"
+    # P0-001 : aucune clé secret codée en dur ; config centralisée, erreur explicite si absente.
+    key = get_settings().STRIPE_SECRET_KEY
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stripe n'est pas configuré (STRIPE_SECRET_KEY absente).",
+        )
+    stripe.api_key = key
 
 
 @router.get("/recruiter/packs")

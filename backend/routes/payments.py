@@ -12,16 +12,27 @@ from database import get_database
 from auth import get_current_active_user
 from models import User
 from storage import put_object, APP_NAME
-
-stripe.api_key = os.environ.get("STRIPE_SECRET_KEY") or "sk_test_emergent"
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-
-
-def _ensure_stripe():
-    """Read the key at request time (server.py loads .env after this module is imported)."""
-    stripe.api_key = os.environ.get("STRIPE_SECRET_KEY") or stripe.api_key
+from config import get_settings
 
 router = APIRouter(tags=["payments"])
+
+# P0-001 : aucune clé Stripe ni secret codé en dur à l'import. La clé est injectée
+# au runtime via la config centralisée. Aucun fallback vers une valeur connue.
+
+def _ensure_stripe():
+    """Configure la clé Stripe au runtime à partir de la config centralisée.
+
+    Si aucune clé n'est configurée (cas autorisé en développement/test), une
+    erreur explicite est levée, sans exposer de secret, dès qu'un appel réel
+    Stripe est nécessaire.
+    """
+    key = get_settings().STRIPE_SECRET_KEY
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stripe n'est pas configuré (STRIPE_SECRET_KEY absente).",
+        )
+    stripe.api_key = key
 
 # Server-side defined packs (EUR). Amounts NEVER trusted from the frontend.
 PACKS = {
@@ -271,7 +282,15 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig = request.headers.get("stripe-signature", "")
     _ensure_stripe()
-    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "") or STRIPE_WEBHOOK_SECRET
+    # P0-001 : le secret de webhook provient de la config centralisée. En
+    # production le démarrage est bloqué s'il manque ; en development/test une
+    # protection défensive runtime explicite est conservée (sans exposer de secret).
+    webhook_secret = get_settings().STRIPE_WEBHOOK_SECRET
+    if not webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook Stripe non configuré (STRIPE_WEBHOOK_SECRET absente).",
+        )
     try:
         event = stripe.Webhook.construct_event(payload, sig, webhook_secret)
     except (stripe.error.SignatureVerificationError, ValueError):

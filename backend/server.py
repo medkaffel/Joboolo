@@ -62,6 +62,10 @@ app.add_middleware(
 # Database event handlers
 @app.on_event("startup")
 async def startup_db_client():
+    # P0-001 : fail-fast config AVANT toute connexion, seed ou scheduler.
+    from config import validate_startup_config
+    validate_startup_config()
+
     await connect_to_mongo()
     # Ensure geospatial index for distance-radius search
     try:
