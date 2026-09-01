@@ -6,11 +6,21 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from models import User, TokenData
 from database import get_database
-import os
 import re
 
-# Configuration
-SECRET_KEY = os.environ.get("SECRET_KEY", "your-secret-key-change-this-in-production")
+# Configuration (P0-001 : source unique, aucun secret codé en dur).
+# SECRET_KEY est peuplé dynamiquement par la config centralisée et validé au
+# démarrage ; il n'existe aucun fallback codé en dur.
+def get_secret_key() -> str:
+    """Retourne la clé de signature JWT, obligatoire dans tous les environnements."""
+    from config import get_settings
+    key = get_settings().SECRET_KEY
+    if not key:
+        # Ne jamais retomber sur un secret connu ; la validation de présence est
+        # aussi effectuée au démarrage (validate_startup_config).
+        raise RuntimeError("SECRET_KEY non configurée (obligatoire dans tous les environnements).")
+    return key
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24  # 30 days
 
@@ -37,7 +47,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, get_secret_key(), algorithm=ALGORITHM)
     return encoded_jwt
 
 async def get_user_by_email(email: str) -> Optional[User]:
@@ -74,7 +84,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     
     try:
         token = credentials.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, get_secret_key(), algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception

@@ -80,6 +80,7 @@ agenthub/agents/youtube/db
 android-sdk/ 
 .env
 .env.*
+!backend/.env.example
 *.env
 credentials.json
 *.key

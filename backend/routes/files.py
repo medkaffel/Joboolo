@@ -7,9 +7,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from database import get_database
-from auth import get_current_active_user, get_user_by_email
+from auth import get_current_active_user, get_user_by_email, get_secret_key
 from jose import jwt, JWTError
-from auth import SECRET_KEY, ALGORITHM
+from auth import ALGORITHM
 from models import User
 from storage import put_object, get_object, APP_NAME
 
@@ -255,7 +255,7 @@ async def _resolve_user(authorization: str, auth: str):
     if not token:
         return None
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, get_secret_key(), algorithms=[ALGORITHM])
         email = payload.get("sub")
     except JWTError:
         return None
