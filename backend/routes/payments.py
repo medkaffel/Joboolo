@@ -160,7 +160,15 @@ async def create_topup(req: TopupRequest, user: User = Depends(require_partner_o
 
 
 async def _credit_if_paid(db, session_id: str):
-    """Idempotently credit the partner balance once the session is paid."""
+    """Idempotently credit the entitlement once the session is paid.
+
+    P0-005: The credit grant and idempotency marker are performed atomically
+    on the SAME user document (single MongoDB update_one). ``credited=True``
+    is set on the transaction only AFTER the grant is confirmed.  If a crash
+    occurs between the grant and the ``credited`` flag, a retry will detect
+    the already-granted session via ``granted_sessions`` and skip the
+    ``$inc``, merely flipping the flag.
+    """
     record = await db.payment_transactions.find_one({"session_id": session_id})
     if not record:
         return None
@@ -179,31 +187,56 @@ async def _credit_if_paid(db, session_id: str):
         except stripe.error.StripeError:
             pass
 
-    # Credit exactly once
+    # Credit exactly once – atomic grant on the user document
     if record.get("payment_status") == "paid" and not record.get("credited"):
-        res = await db.payment_transactions.update_one(
+        kind = record.get("kind")
+        if kind == "recruiter_pack" and record.get("user_id"):
+            user_id = record["user_id"]
+            amount = int(record.get("postings") or 0)
+            # Atomic: $addToSet + $inc on the SAME user document.
+            # If session_id already in granted_sessions → modified_count == 0
+            # (no double credit).
+            grant_res = await db.users.update_one(
+                {"_id": user_id, "granted_sessions": {"$ne": session_id}},
+                {
+                    "$inc": {"premium_credits": amount},
+                    "$addToSet": {"granted_sessions": session_id},
+                },
+            )
+            if grant_res.modified_count == 1:
+                await _send_recruiter_receipt(db, record)
+        elif kind == "posting_pack" and record.get("postings"):
+            partner_id = record.get("partner_id")
+            amount = int(record.get("postings") or 0)
+            grant_res = await db.partner_profiles.update_one(
+                {"user_id": partner_id, "granted_sessions": {"$ne": session_id}},
+                {
+                    "$inc": {"postings_remaining": amount},
+                    "$addToSet": {"granted_sessions": session_id},
+                },
+            )
+            if grant_res.modified_count == 1:
+                await _send_receipt(db, record)
+        elif record.get("partner_id"):
+            partner_id = record["partner_id"]
+            amount = float(record.get("amount") or 0)
+            grant_res = await db.partner_profiles.update_one(
+                {"user_id": partner_id, "granted_sessions": {"$ne": session_id}},
+                {
+                    "$inc": {"balance": amount},
+                    "$set": {"low_balance_notified": False},
+                    "$addToSet": {"granted_sessions": session_id},
+                },
+            )
+            if grant_res.modified_count == 1:
+                await _send_receipt(db, record)
+
+        # Mark the transaction as credited AFTER the grant is confirmed.
+        # Safe to call even if grant was already applied (idempotent).
+        await db.payment_transactions.update_one(
             {"session_id": session_id, "credited": {"$ne": True}},
             {"$set": {"credited": True, "credited_at": datetime.now(timezone.utc)}},
         )
-        if res.modified_count == 1:
-            if record.get("kind") == "recruiter_pack" and record.get("user_id"):
-                await db.users.update_one(
-                    {"_id": record["user_id"]},
-                    {"$inc": {"premium_credits": int(record.get("postings") or 0)}},
-                )
-                await _send_recruiter_receipt(db, record)
-            elif record.get("kind") == "posting_pack" and record.get("postings"):
-                await db.partner_profiles.update_one(
-                    {"user_id": record["partner_id"]},
-                    {"$inc": {"postings_remaining": int(record["postings"])}},
-                )
-                await _send_receipt(db, record)
-            else:
-                await db.partner_profiles.update_one(
-                    {"user_id": record["partner_id"]},
-                    {"$inc": {"balance": float(record["amount"])}, "$set": {"low_balance_notified": False}},
-                )
-                await _send_receipt(db, record)
         record = await db.payment_transactions.find_one({"session_id": session_id})
     return record
 

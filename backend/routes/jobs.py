@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, status
 from typing import List, Optional
 from models import (
     Job, JobCreate, JobUpdate, JobResponse, JobSearchQuery, JobSearchResponse,
@@ -253,9 +253,13 @@ async def create_job(
     job_data: JobCreate,
     current_user: User = Depends(require_employer)
 ):
-    """Create a new job posting (employers only)"""
+    """Create a new job posting (employers only).
+
+    P0-005: Exactly one ``premium_credits`` is consumed atomically when the
+    job is created.  If the insert fails the credit is refunded.
+    """
     db = await get_database()
-    
+
     # Verify company belongs to user
     company = await db.companies.find_one({
         "_id": job_data.company_id,
@@ -266,7 +270,19 @@ async def create_job(
             status_code=403,
             detail="You can only post jobs for companies you own"
         )
-    
+
+    # P0-005: Atomic premium credit consumption.
+    # filter requires premium_credits >= 1 so it can never go negative.
+    credit_result = await db.users.update_one(
+        {"_id": current_user.id, "premium_credits": {"$gte": 1}},
+        {"$inc": {"premium_credits": -1}},
+    )
+    if credit_result.modified_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Crédits premium insuffisants. Veuillez acheter un pack d'offres Premium.",
+        )
+
     # Create job document
     job_doc = {
         "_id": f"job_{datetime.utcnow().timestamp()}",
@@ -278,10 +294,17 @@ async def create_job(
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }
-    
-    # Insert job
-    await db.jobs.insert_one(job_doc)
-    
+
+    # Insert job – refund the credit on failure (compensable protocol).
+    try:
+        await db.jobs.insert_one(job_doc)
+    except Exception:
+        await db.users.update_one(
+            {"_id": current_user.id},
+            {"$inc": {"premium_credits": 1}},
+        )
+        raise
+
     return await populate_job_response(job_doc, db)
 
 @router.put("/{job_id}", response_model=JobResponse)
