@@ -1,4 +1,4 @@
-name: OpenCode
+name: opencode
 
 on:
   issue_comment:
@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
+      id-token: write
       contents: write
       pull-requests: write
       issues: write
@@ -32,5 +33,5 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: gpt-5-nano
+          model: gpt-5.3-codex
           use_github_token: true
