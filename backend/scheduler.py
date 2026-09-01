@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import get_database
 from email_service import build_alert_html, send_alert_email
+from campaign_lifecycle import fetch_public_job_filter, is_campaign_diffusible
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +15,8 @@ scheduler = AsyncIOScheduler()
 APP_URL = os.environ.get("FRONTEND_URL", "https://job-platform-next.preview.emergentagent.com")
 
 
-def _build_job_query(alert: dict, since: datetime) -> dict:
-    query = {"is_active": True, "created_at": {"$gt": since}}
+def _build_job_query(alert: dict, since: datetime, public_filter: dict) -> dict:
+    query = {**public_filter, "created_at": {"$gt": since}}
     if alert.get("search"):
         s = alert["search"]
         query["$or"] = [
@@ -60,7 +61,10 @@ async def process_alerts():
         else:
             since = now - window
 
-        query = _build_job_query(alert, since)
+        # P0-006 : les alertes ne doivent jamais exposer les offres de
+        # campagnes non diffusibles.
+        public_filter = await fetch_public_job_filter(db, now)
+        query = _build_job_query(alert, since, public_filter)
         jobs = await db.jobs.find(query).sort([("created_at", -1)]).limit(10).to_list(length=10)
 
         if not jobs:
@@ -99,6 +103,10 @@ async def refresh_campaign_feeds():
     from email_service import build_auto_import_email, send_alert_email
     auto_email = bool(settings.get("auto_import_email", True))
     for camp in campaigns:
+        # P0-006 : une campagne paused/future/expirée/budget épuisé n'est pas
+        # diffusible => on saute son import auto sans rien réimporter.
+        if not is_campaign_diffusible(camp, now):
+            continue
         last = camp.get("last_import_at")
         if isinstance(last, str):
             try:

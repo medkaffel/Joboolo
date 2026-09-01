@@ -8,7 +8,7 @@
 Feed/CPC/billing are provided per campaign (falls back to the partner profile when not given).
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 from fastapi import HTTPException
@@ -76,7 +76,7 @@ def _parse_ads(root):
 
 
 async def import_feed(db, partner_id, xml_content=None, *, feed_url=None, cpc=None,
-                      billing_mode=None, campaign_id=None):
+                      billing_mode=None, campaign_id=None, validity_days=None):
     import xml.etree.ElementTree as ET
 
     profile = await db.partner_profiles.find_one({"user_id": partner_id})
@@ -151,6 +151,12 @@ async def import_feed(db, partner_id, xml_content=None, *, feed_url=None, cpc=No
                 "_id": f"pjob_{uuid.uuid4()}", "is_active": True,
                 "views_count": 0, "applications_count": 0, "created_at": now,
             })
+            # P0-006 : un job per_posting nouvelle insertion expire
+            # validity_days après sa création. Une mise à jour du même
+            # external_ref ne renouvelle jamais expires_at (job_fields ne le
+            # contient pas). Legacy sans expires_at reste compatible.
+            if billing_mode == "per_posting" and validity_days:
+                job_fields["expires_at"] = now + timedelta(days=int(validity_days))
             await db.jobs.insert_one(job_fields)
             imported += 1
 
@@ -173,7 +179,17 @@ async def import_feed(db, partner_id, xml_content=None, *, feed_url=None, cpc=No
 
 
 async def import_campaign_feed(db, campaign, xml_content=None, trigger="manual"):
-    """Run a campaign import and record an import_logs entry (start/end/new ads)."""
+    """Run a campaign import and record an import_logs entry (start/end/new ads).
+
+    P0-006 fail-closed : une campagne paused/future/expirée/budget épuisé n'est
+    PAS diffusible => import refusé (409) sans aucune écriture. C'est le cas
+    d'un import manuel ; l'import auto saute en amont dans le scheduler."""
+    from campaign_lifecycle import is_campaign_diffusible
+    if not is_campaign_diffusible(campaign, datetime.utcnow()):
+        raise HTTPException(
+            status_code=409,
+            detail="La campagne n'est pas effectivement diffusible (paused, future, expirée ou budget épuisé). Import refusé.",
+        )
     started = datetime.utcnow()
     log = {
         "_id": f"implog_{uuid.uuid4()}", "campaign_id": campaign["_id"],
@@ -185,6 +201,7 @@ async def import_campaign_feed(db, campaign, xml_content=None, trigger="manual")
             db, campaign["partner_id"], xml_content,
             feed_url=campaign.get("xml_feed_url"), cpc=campaign.get("cpc"),
             billing_mode=campaign.get("billing_mode"), campaign_id=campaign["_id"],
+            validity_days=campaign.get("validity_days"),
         )
     except HTTPException as e:
         log.update({"finished_at": datetime.utcnow(), "imported": 0, "updated": 0, "status": "error", "error": str(e.detail)})

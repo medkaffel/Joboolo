@@ -4,6 +4,7 @@ from models import SavedJob, JobResponse, User, UserType
 from database import get_database
 from auth import get_current_active_user
 from routes.jobs import populate_job_response
+from campaign_lifecycle import is_job_publicly_visible, get_job_campaign, fetch_public_job_filter
 from datetime import datetime
 
 router = APIRouter(prefix="/saved-jobs", tags=["saved-jobs"])
@@ -22,12 +23,9 @@ async def save_job(
     
     db = await get_database()
     
-    # Check if job exists
-    job = await db.jobs.find_one({
-        "_id": job_id,
-        "is_active": True
-    })
-    if not job:
+    # Check if job exists and is publicly visible (P0-006)
+    job = await db.jobs.find_one({"_id": job_id})
+    if not job or not is_job_publicly_visible(job, await get_job_campaign(db, job)):
         raise HTTPException(
             status_code=404,
             detail="Job not found or no longer active"
@@ -107,11 +105,10 @@ async def get_saved_jobs(current_user: User = Depends(get_current_active_user)):
     if not job_ids:
         return []
     
-    # Get actual jobs
-    jobs_cursor = db.jobs.find({
-        "_id": {"$in": job_ids},
-        "is_active": True
-    })
+    # Get actual jobs (publicly visible only — P0-006)
+    query = await fetch_public_job_filter(db)
+    query["_id"] = {"$in": job_ids}
+    jobs_cursor = db.jobs.find(query)
     jobs_docs = await jobs_cursor.to_list(length=100)
     
     # Populate responses

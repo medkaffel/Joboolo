@@ -8,6 +8,11 @@ from database import get_database
 from auth import get_current_active_user, require_employer
 from datetime import datetime, timedelta
 from geo_service import resolve_location_codes, postcode_regex, geocode_place
+from campaign_lifecycle import (
+    is_job_publicly_visible,
+    get_job_campaign,
+    fetch_public_job_filter,
+)
 import re
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -128,14 +133,17 @@ async def suggest(q: str = Query("", description="prefix"), field: str = Query("
     q = (q or "").strip()
     if len(q) < 2:
         return {"suggestions": []}
+    public_filter = await fetch_public_job_filter(db)
     rx = {"$regex": q, "$options": "i"}
     if field == "location":
-        vals = await db.jobs.distinct("location", {"is_active": True, "location": rx})
+        public_filter = {**public_filter, "location": rx}
+        vals = await db.jobs.distinct("location", public_filter)
     elif field == "company":
         comps = await db.companies.find({"name": rx}).limit(8).to_list(length=8)
         return {"suggestions": [c.get("name") for c in comps if c.get("name")][:8]}
     else:
-        vals = await db.jobs.distinct("title", {"is_active": True, "title": rx})
+        public_filter = {**public_filter, "title": rx}
+        vals = await db.jobs.distinct("title", public_filter)
     vals = [v for v in vals if v][:8]
     return {"suggestions": vals}
 
@@ -158,8 +166,8 @@ async def search_jobs(
     """Search and filter jobs with pagination"""
     db = await get_database()
     
-    # Build query
-    query = {"is_active": True}
+    # Build query: base is the public visibility guard (P0-006)
+    query = await fetch_public_job_filter(db)
     and_clauses = []
 
     if search:
@@ -256,11 +264,11 @@ async def get_my_jobs(current_user: User = Depends(require_employer)):
 
 @router.get("/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str):
-    """Get a specific job by ID"""
+    """Get a specific job by ID (public detail: only publicly visible offers)."""
     db = await get_database()
     
-    job_doc = await db.jobs.find_one({"_id": job_id, "is_active": True})
-    if not job_doc:
+    job_doc = await db.jobs.find_one({"_id": job_id})
+    if not job_doc or not is_job_publicly_visible(job_doc, await get_job_campaign(db, job_doc)):
         raise HTTPException(status_code=404, detail="Job not found")
     
     # Increment view count
@@ -431,11 +439,10 @@ async def get_company_jobs(company_id: str):
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
     
-    # Get company jobs
-    cursor = db.jobs.find({
-        "company_id": company_id,
-        "is_active": True
-    }).sort([("created_at", -1)])
+    # Get public jobs for the company (P0-006 : garde public)
+    public_filter = await fetch_public_job_filter(db)
+    query = {**public_filter, "company_id": company_id}
+    cursor = db.jobs.find(query).sort([("created_at", -1)])
     
     jobs_docs = await cursor.to_list(length=100)
     
@@ -452,6 +459,13 @@ async def record_partner_click(job_id: str):
     db = await get_database()
     job = await db.jobs.find_one({"_id": job_id})
     if not job:
+        raise HTTPException(status_code=404, detail="Offre introuvable")
+
+    # P0-006 : refuser un clic sur une offre non publiquement visible AVANT
+    # tout redirect, débit, compteur ou attribution. Job inactif / expiré /
+    # campagne non diffusible => 404, aucun clic ni impulsion.
+    job_campaign = await get_job_campaign(db, job)
+    if not is_job_publicly_visible(job, job_campaign):
         raise HTTPException(status_code=404, detail="Offre introuvable")
 
     redirect_url = job.get("external_url")
@@ -502,8 +516,12 @@ async def record_partner_click(job_id: str):
         )
         camp = await db.campaigns.find_one({"_id": job["campaign_id"]})
         if camp and camp.get("budget_limit") and float(camp.get("spent", 0.0)) >= float(camp["budget_limit"]):
+            # P0-006 : on met la campagne en pause (elle n'est plus diffusible),
+            # mais on ne désactive plus aveuglément les offres de la campagne :
+            # une reprise ne doit jamais ressusciter un job arrêté pour une autre
+            # raison (ex. P0-004 solde CPC insuffisant). La diffusibilité est
+            # désormais calculée dynamiquement par campaign_lifecycle.
             await db.campaigns.update_one({"_id": job["campaign_id"]}, {"$set": {"status": "paused"}})
-            await db.jobs.update_many({"campaign_id": job["campaign_id"]}, {"$set": {"is_active": False}})
 
     await db.jobs.update_one({"_id": job_id}, {"$inc": {"views_count": 1}})
     return {"redirect_url": redirect_url}
@@ -524,7 +542,11 @@ async def record_impressions(body: ImpressionBatch):
     ids = [i for i in (body.job_ids or []) if i][:100]
     if not ids:
         return {"recorded": 0}
-    jobs = await db.jobs.find({"_id": {"$in": ids}, "is_partner": True}).to_list(length=len(ids))
+    # P0-006 : ne journaliser que les impressions d'offres publiquement visibles.
+    query = await fetch_public_job_filter(db)
+    query["_id"] = {"$in": ids}
+    query["is_partner"] = True
+    jobs = await db.jobs.find(query).to_list(length=len(ids))
     now = datetime.utcnow()
     events, camp_inc, partner_inc = [], {}, {}
     for j in jobs:
