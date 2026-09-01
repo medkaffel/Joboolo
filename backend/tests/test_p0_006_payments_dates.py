@@ -12,6 +12,7 @@ Couvre :
   stockée (incohérence => 400) ;
 - status restreint à active|paused.
 """
+import asyncio
 import importlib.util
 import sys
 import types
@@ -163,6 +164,101 @@ def test_junk_suffix_date_rejected(payments):
         with pytest.raises(_HTTPException) as e:
             payments._validate_campaign_dates(bad, None)
         assert e.value.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# _validate_campaign_dates — normalisation AVANT écriture                     #
+# --------------------------------------------------------------------------- #
+def test_outer_spaces_normalized_before_write(payments):
+    # Régression : une borne avec des espaces extérieurs est acceptée MAIS sa
+    # valeur NORMALISÉE (trim, strict YYYY-MM-DD) doit être renvoyée pour être
+    # stockée. Sinon la valeur brute serait stockée (invalide) puis fail-closed
+    # à la lecture alors qu'elle avait été validée à l'écriture.
+    start, end = payments._validate_campaign_dates("  2026-01-01  ", "  2026-12-31 ")
+    assert start == "2026-01-01"
+    assert end == "2026-12-31"
+    assert start == start.strip() and "  " not in start
+
+
+def test_outer_spaces_single_boundary_normalized(payments):
+    start, end = payments._validate_campaign_dates(" 2026-05-05", None)
+    assert start == "2026-05-05"
+    assert end is None
+    start, end = payments._validate_campaign_dates(None, "2026-05-05 ")
+    assert start is None
+    assert end == "2026-05-05"
+
+
+def test_no_space_values_returned_as_is(payments):
+    start, end = payments._validate_campaign_dates("2026-01-01", "2026-12-31")
+    assert start == "2026-01-01"
+    assert end == "2026-12-31"
+    start, end = payments._validate_campaign_dates("", "")
+    assert start is None
+    assert end is None
+    start, end = payments._validate_campaign_dates(None, None)
+    assert start is None
+    assert end is None
+
+
+# --------------------------------------------------------------------------- #
+# create_campaign — les dates NORMALISÉES sont réellement stockées             #
+# --------------------------------------------------------------------------- #
+class _CampaignsDB:
+    def __init__(self):
+        self.inserted = None
+
+    async def insert_one(self, doc):
+        self.inserted = doc
+
+
+class _FakeDB:
+    def __init__(self):
+        self.campaigns = _CampaignsDB()
+
+
+def _install_routes_admin_stub(monkeypatch):
+    """routes.admin = get_settings requis par create_campaign (import lazy)."""
+    routes = types.ModuleType("routes")
+    routes.__path__ = []
+    admin = types.ModuleType("routes.admin")
+
+    async def get_settings(db):
+        return {"pack_validity_days": 30}
+
+    admin.get_settings = get_settings
+    routes.admin = admin
+    monkeypatch.setitem(sys.modules, "routes", routes)
+    monkeypatch.setitem(sys.modules, "routes.admin", admin)
+
+
+def test_create_campaign_stores_normalized_dates(payments, monkeypatch):
+    # Régression : une borne saisie avec des espaces extérieurs est acceptée et
+    # stockée NORMALISÉE (strict YYYY-MM-DD, sans espace). Jamais de valeur
+    # brute stockée qui serait invalide à la lecture (fail-closed en cachette).
+    _install_routes_admin_stub(monkeypatch)
+    db = _FakeDB()
+
+    async def _fake_db():
+        return db
+
+    payments.get_database = _fake_db
+    partner = _Model(id="partner_audit", user_type="partner")
+    data = _Model(
+        name="C", billing_mode="per_click", cpc=None, cpc_max=None,
+        pack_price=None, xml_feed_url="https://feed.example/xml", logo_url=None,
+        start_date="  2026-01-01  ", end_date="  2026-12-31 ", budget_limit=None,
+    )
+    asyncio.run(payments.create_campaign(data, partner))
+    assert db.campaigns.inserted["start_date"] == "2026-01-01"
+    assert db.campaigns.inserted["end_date"] == "2026-12-31"
+    assert "  " not in db.campaigns.inserted["start_date"]
+    assert "  " not in db.campaigns.inserted["end_date"]
+
+    # Le retour de la route expose les valeurs propres stockées.
+    out = payments._campaign_out(db.campaigns.inserted)
+    assert out["start_date"] == "2026-01-01"
+    assert out["end_date"] == "2026-12-31"
 
 
 # --------------------------------------------------------------------------- #

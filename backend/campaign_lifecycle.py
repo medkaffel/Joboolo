@@ -17,11 +17,15 @@ Règles de diffusibilité d'une campagne (champs réellement stockés) :
   `per_posting` ne bloque jamais.
 
 Visibilité publique d'une offre :
-- `is_active == True` ;
+- `is_active == True` (un champ `is_active` absent ou falsy => jamais
+  publique, même règle que le filtre Mongo `{"is_active": True}`) ;
 - non expirée : `expires_at` absent OU `None` => jamais expirée ; sinon
   expirée dès `now >= expires_at` (comparaison UTC déterministe, naive traitée
   comme UTC). Un `expires_at` non vide mais non parseable => fail-closed
-  (offre jamais rendue publique) ;
+  (offre jamais rendue publique). Un `expires_at` présent mais vide ou réduit
+  à des espaces ("" / "  ") est AUSSI fail-closed : même règle que le filtre
+  Mongo (`{"expires_at": {"$gt": now}}` exclut toute valeur non-datetime),
+  pour éviter tout cas « visible en détail mais caché en liste » ;
 - si l'offre est rattachée à une campagne (`campaign_id`), celle-ci doit être
   effectivement diffusible. Les offres sans `campaign_id` (absent OU `None`,
   ex. legacy) restent visibles tant qu'elles sont actives et non expirées.
@@ -134,13 +138,15 @@ def is_campaign_diffusible(campaign: Optional[dict], now: Optional[datetime] = N
 
 
 def is_job_expired(job: dict, now: Optional[datetime] = None) -> bool:
-    """Une offre est expirée dès `now >= expires_at`. Absence ou `None` =>
-    jamais expirée. Comparaison UTC déterministe (naive/aware normalisées).
+    """Une offre est expirée dès `now >= expires_at`. Absence, `None` ou une
+    chaîne vide/espaces => jamais expirée. Comparaison UTC déterministe
+    (naive/aware normalisées).
 
-    NOTE : un `expires_at` non vide mais non parseable n'est PAS traité ici
-    comme expiré — le fail-closed correspondant est géré par
-    `is_job_publicly_visible` (accès direct) et par le filtre Mongo
-    `fetch_public_job_filter`."""
+    NOTE : ce helper n'IMPOSE PAS le fail-closed de visibilité — un
+    `expires_at` non vide mais non parseable n'est PAS traité ici comme
+    expiré. Le fail-closed (chaîne vide/espaces ET non parseable) est la
+    responsabilité de `is_job_publicly_visible` (accès direct) et du filtre
+    Mongo `fetch_public_job_filter`, alignés sur une seule règle."""
     exp_raw = job.get("expires_at")
     if exp_raw is None:
         return False
@@ -152,19 +158,17 @@ def is_job_expired(job: dict, now: Optional[datetime] = None) -> bool:
     return _now(now) >= _as_utc(exp)
 
 
-def _has_nonempty_expires_at(job: dict) -> bool:
-    val = job.get("expires_at")
-    if val is None:
-        return False
-    if isinstance(val, str):
-        return bool(val.strip())
-    return True
-
-
 def is_job_publicly_visible(job, campaign: Optional[dict] = None,
                             now: Optional[datetime] = None) -> bool:
     """Garde public complet d'une offre pour un accès direct : is_active +
     expiration (fail-closed sur `expires_at` invalide) + campagne diffusible.
+
+    Règle unique alignée sur le filtre Mongo `fetch_public_job_filter` :
+    - `is_active` doit être exactement `True` (absent/falsy => non visible) ;
+    - `expires_at` absent OU `None` => jamais expirée ; sinon la valeur doit
+      être un datetime parseable strictement plus grand que `now`. Toute autre
+      valeur (chaîne vide/espaces, non parseable, datetime passé) est
+      fail-closed : l'offre n'est jamais visible, en détail comme en liste.
 
     `campaign` doit être fourni si l'offre a un `campaign_id` : sans campagne
     résolue (ou campagne non diffusible), l'offre rattachée est considérée non
@@ -173,13 +177,21 @@ def is_job_publicly_visible(job, campaign: Optional[dict] = None,
     """
     if not job:
         return False
-    if not job.get("is_active", True):
+    # Aligné sur le filtre Mongo `{"is_active": True}` : un champ absent ou
+    # falsy ne doit jamais être visible en détail alors qu'il le serait caché
+    # en liste.
+    if not job.get("is_active"):
         return False
-    # Fail-closed : expires_at non vide mais non parseable => offre non visible.
-    if _has_nonempty_expires_at(job) and _as_datetime(job.get("expires_at")) is None:
-        return False
-    if is_job_expired(job, now):
-        return False
+    exp_raw = job.get("expires_at")
+    if exp_raw is not None:
+        # Fail-closed : présent mais vide/espaces OU non parseable => jamais.
+        # (Absent OU None => jamais expirée, aucune contrainte ici.)
+        if isinstance(exp_raw, str) and not exp_raw.strip():
+            return False
+        if _as_datetime(exp_raw) is None:
+            return False
+        if is_job_expired(job, now):
+            return False
     cid = job.get("campaign_id")
     if cid:
         if not is_campaign_diffusible(campaign, now):
@@ -204,8 +216,13 @@ async def fetch_public_job_filter(db, now: Optional[datetime] = None) -> dict:
     campagnes diffusibles, puis on construit un `$and` combinant :
     - le rattachement : offres liées à une campagne diffusible, OU sans
       campagne du tout (`campaign_id` absent OU `None`, legacy) ;
-    - l'expiration : `expires_at` absent OU `None` (legacy), OU `expires_at`
-      présent mais `> now`.
+    - l'expiration (règle unique, fail-closed, alignée sur
+      `is_job_publicly_visible`) : `expires_at` absent OU `None` (legacy), OU
+      une valeur datetime strictement `> now`. Toute autre valeur est exclue
+      par `{"expires_at": {"$gt": now}}` : une datetime passée est barrée, et
+      toute valeur non-datetime (chaîne vide/espaces, `null`-like, nombre,
+      texte non parseable) est exclue par l'ordre des types BSON. Aucun cas
+      « visible en détail mais caché en liste ».
 
     Le tout est composé via `$and` sans jamais écraser un `$or` existant d'un
     appelant (ex. `search` d'une alerte). `is_active=True` est conservé.

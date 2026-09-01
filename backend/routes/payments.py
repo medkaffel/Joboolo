@@ -507,6 +507,10 @@ def _validate_campaign_dates(start_date, end_date):
     - état final fusionné : start_date <= end_date (sinon 400).
     - une valeur None ou '' ('' = suppression de la borne) n'impose aucune
       contrainte. Une date non vide mais invalide => 400.
+
+    Retourne les valeurs normalisées (None, '' ou chaîne YYYY-MM-DD exacte)
+    pour que l'appelant stocke toujours une valeur propre, sans espaces
+    extérieurs, quelle que soit la saisie d'origine.
     """
     def _check(value, label):
         if value is None:
@@ -526,15 +530,17 @@ def _validate_campaign_dates(start_date, end_date):
                 status_code=400,
                 detail=f"{label} invalide : format attendu YYYY-MM-DD.",
             )
-        return d
+        return s  # valeur normalisée (trimée, strict YYYY-MM-DD)
 
     start = _check(start_date, "start_date")
     end = _check(end_date, "end_date")
+    # Comparaison sur les chaînes normalisées (format YYYY-MM-DD ordonné lexicalement).
     if start is not None and end is not None and start > end:
         raise HTTPException(
             status_code=400,
             detail="start_date doit être inférieure ou égale à end_date.",
         )
+    return start, end
 
 
 def _validate_campaign_status(status):
@@ -574,7 +580,7 @@ async def create_campaign(data: CampaignCreate, user: User = Depends(require_par
     from routes.admin import get_settings
     if not (data.xml_feed_url or "").strip():
         raise HTTPException(status_code=400, detail="L'URL du flux XML est obligatoire")
-    _validate_campaign_dates(data.start_date, data.end_date)
+    start_date, end_date = _validate_campaign_dates(data.start_date, data.end_date)
     settings = await get_settings(db)
     now = datetime.now(timezone.utc)
     validity = settings["pack_validity_days"] if data.billing_mode == "per_posting" else None
@@ -588,8 +594,8 @@ async def create_campaign(data: CampaignCreate, user: User = Depends(require_par
         "pack_price": data.pack_price if data.billing_mode == "per_posting" else None,
         "xml_feed_url": data.xml_feed_url,
         "logo_url": data.logo_url,
-        "start_date": data.start_date,
-        "end_date": data.end_date,
+        "start_date": start_date,
+        "end_date": end_date,
         "budget_limit": data.budget_limit if data.billing_mode == "per_click" else None,
         "validity_days": validity,
         "spent": 0.0, "clicks": 0, "jobs_count": 0, "status": "active",
@@ -608,10 +614,15 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, user: User = D
     fields = {k: v for k, v in data.dict().items() if v is not None}
     _validate_campaign_status(fields.get("status"))
     # P0-006 : valide chaque borne envoyée ET l'état final fusionné avec l'autre
-    # borne déjà stockée (update partielle).
+    # borne déjà stockée (update partielle). Les valeurs renvoyées sont
+    # normalisées (espaces extérieurs retirés AVANT écriture) et persistées.
     new_start = fields.get("start_date") if "start_date" in fields else camp.get("start_date")
     new_end = fields.get("end_date") if "end_date" in fields else camp.get("end_date")
-    _validate_campaign_dates(new_start, new_end)
+    new_start, new_end = _validate_campaign_dates(new_start, new_end)
+    if "start_date" in fields:
+        fields["start_date"] = new_start
+    if "end_date" in fields:
+        fields["end_date"] = new_end
     fields["updated_at"] = datetime.now(timezone.utc)
     await db.campaigns.update_one({"_id": campaign_id}, {"$set": fields})
     return _campaign_out(await db.campaigns.find_one({"_id": campaign_id}))

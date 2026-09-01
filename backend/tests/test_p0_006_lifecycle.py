@@ -211,11 +211,37 @@ def test_expires_at_none_visible():
     assert is_job_publicly_visible(_job(expires_at=None), None) is True
 
 
+def test_expires_at_empty_or_whitespace_fail_closed():
+    # Règle unique fail-closed, alignée sur le filtre Mongo : un expires_at
+    # présent mais vide ("") ou réduit à des espaces ("  ") n'est jamais
+    # visible EN DÉTAIL, exactement comme en liste (où `{"$gt": now}` exclut
+    # toute valeur non-datetime). Aucun cas « visible en détail mais caché en
+    # liste ».
+    assert is_job_publicly_visible(_job(expires_at=""), None) is False
+    assert is_job_publicly_visible(_job(expires_at="   "), None) is False
+    assert is_job_publicly_visible(_job(expires_at="\t"), None) is False
+    # Absent OU None => jamais expirée, toujours visible.
+    assert is_job_publicly_visible(_job(), None) is True
+    assert is_job_publicly_visible(_job(expires_at=None), None) is True
+
+
 def test_expires_at_unparseable_fail_closed():
     # FAIL-CLOSED : expires_at non vide mais non parseable => offre non visible.
     assert is_job_publicly_visible(_job(expires_at="garbage"), None) is False
     assert is_job_publicly_visible(_job(expires_at="2026-09-01junk"), None) is False
     assert is_job_publicly_visible(_job(expires_at=123456), None) is False
+
+
+def test_is_active_missing_not_visible():
+    # Aligné sur le filtre Mongo `{"is_active": True}` : un champ is_active
+    # absent (ou falsy) ne doit JAMAIS être visible en détail alors qu'il le
+    # serait caché en liste.
+    missing = {"_id": "j-no-active", "expires_at": None}
+    assert is_job_publicly_visible(missing, None) is False
+    missing_camp = {"_id": "j-no-active2", "campaign_id": "c1", "expires_at": None}
+    assert is_job_publicly_visible(missing_camp, _camp()) is False
+    assert is_job_publicly_visible(_job(is_active=False), None) is False
+    assert is_job_publicly_visible(_job(is_active=True), None) is True
 
 
 def test_campaign_job_needs_diffusible_campaign():
@@ -362,6 +388,34 @@ def test_fetch_public_filter_preserves_expires_at_absent_none_and_future():
     assert "absent" in keys
     assert "none" in keys
     assert "future" in keys
+
+
+def test_fetch_public_filter_expires_rule_admits_only_absent_none_future():
+    # Invariant de la règle unique fail-closed : le filtre n'admet UNIQUEMENT
+    # expires_at absent, None, ou une valeur datetime > now. Aucune autre
+    # branche (qui laisserait passer une chaîne vide/espaces) ne doit exister,
+    # sinon un job « visible en liste » le serait aussi en détail.
+    now = datetime.now(timezone.utc)
+    docs = [{"_id": "ok1", "status": "active", "start_date": None, "end_date": None,
+             "billing_mode": "per_click", "budget_limit": None, "spent": 0.0}]
+    db = _DB(docs)
+    filt = asyncio.run(fetch_public_job_filter(db, now))
+    _, exp_branches = _campaign_branches(filt)
+    assert len(exp_branches) == 3
+    forms = []
+    for o in exp_branches:
+        assert isinstance(o, dict) and "expires_at" in o
+        v = o["expires_at"]
+        if v is None:
+            forms.append("none")
+        elif isinstance(v, dict) and set(v) == {"$exists"}:
+            forms.append("absent")
+        elif isinstance(v, dict) and "$gt" in v:
+            assert v["$gt"] == now
+            forms.append("future")
+        else:
+            forms.append("unauthorized")
+    assert set(forms) == {"absent", "none", "future"}, forms
 
 
 def test_fetch_public_filter_end_date_inclusive_today():

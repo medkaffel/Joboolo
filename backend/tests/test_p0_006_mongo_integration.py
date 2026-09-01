@@ -857,6 +857,53 @@ class TestStrictDatesAndExpiry:
 
         _run(scenario())
 
+    def test_expires_at_empty_whitespace_is_active_missing_fail_closed(self, jobs_module):
+        # Règle unique fail-closed (audit P0-006) : expires_at="" / espaces et
+        # un champ is_active absent sont cachés EN LISTE comme EN DÉTAIL (404),
+        # jamais « visible en détail mais caché en liste ».
+        if not _mongo_available():
+            pytest.skip("MongoDB not available")
+
+        async def scenario():
+            client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=3000)
+            db_name = f"p006_failclosed_{uuid.uuid4().hex}"
+            db = client[db_name]
+            try:
+                await db.campaigns.insert_one(_camp_doc("active"))
+                await db.companies.insert_one(_company_doc())
+                await db.jobs.insert_one(_job_doc("j_empty", campaign_id="active",
+                                                  is_active=True, expires_at=""))
+                await db.jobs.insert_one(_job_doc("j_spaces", campaign_id="active",
+                                                  is_active=True, expires_at="   "))
+                await db.jobs.insert_one(_job_doc("j_garbage", campaign_id="active",
+                                                  is_active=True, expires_at="not-a-date"))
+                missing_active = _job_doc("j_missing_active", campaign_id="active",
+                                          is_active=True)
+                del missing_active["is_active"]
+                await db.jobs.insert_one(missing_active)
+                await db.jobs.insert_one(_job_doc("j_ok", campaign_id="active", is_active=True))
+                await _wire(db, jobs_module)
+
+                # détail : chaque valeur invalide => 404
+                for jid in ("j_empty", "j_spaces", "j_garbage", "j_missing_active"):
+                    try:
+                        await jobs_module.get_job(jid)
+                        assert False, f"{jid} should 404 (détail)"
+                    except _HTTPException as e:
+                        assert e.status_code == 404
+
+                # liste : les mêmes offres sont toutes exclues
+                res = await jobs_module.search_jobs()
+                ids = {j.id for j in res.jobs}
+                assert "j_ok" in ids
+                for jid in ("j_empty", "j_spaces", "j_garbage", "j_missing_active"):
+                    assert jid not in ids
+            finally:
+                await client.drop_database(db_name)
+                client.close()
+
+        _run(scenario())
+
     def test_campaign_with_invalid_stored_date_fail_closed(self, jobs_module, feed_module):
         # FAIL-CLOSED : une campagne avec une date stockée non vide mais non
         # parseable (2026-09-01junk) n'est jamais diffusible => son offre est
