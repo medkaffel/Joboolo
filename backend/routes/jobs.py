@@ -394,17 +394,22 @@ async def record_partner_click(job_id: str):
     if profile and profile.get("billing_mode") == "per_click":
         cpc = job.get("cpc") if job.get("cpc") is not None else profile.get("default_cpc", 0.0)
         cpc = float(cpc or 0.0)
-        balance = float(profile.get("balance", 0.0))
-        if balance >= cpc and cpc > 0:
-            charged = cpc
-            await db.partner_profiles.update_one({"user_id": job["partner_id"]}, {"$inc": {"total_clicks": 1, "balance": -cpc, "total_spent": cpc}})
-            await _check_low_balance(db, job["partner_id"])
-        else:
-            # Not enough budget: stop diffusion
-            await db.partner_profiles.update_one({"user_id": job["partner_id"]}, {"$inc": {"total_clicks": 1}})
-            if cpc > 0:
+        if cpc > 0:
+            # Atomic balance check + debit: filter requires balance >= cpc
+            result = await db.partner_profiles.update_one(
+                {"user_id": job["partner_id"], "balance": {"$gte": cpc}},
+                {"$inc": {"total_clicks": 1, "balance": -cpc, "total_spent": cpc}},
+            )
+            if result.modified_count == 1:
+                charged = cpc
+                await _check_low_balance(db, job["partner_id"])
+            else:
+                # Insufficient balance: no debit, but count the click once
+                await db.partner_profiles.update_one({"user_id": job["partner_id"]}, {"$inc": {"total_clicks": 1}})
                 stopped = True
                 await db.jobs.update_one({"_id": job_id}, {"$set": {"is_active": False}})
+        else:
+            await db.partner_profiles.update_one({"user_id": job["partner_id"]}, {"$inc": {"total_clicks": 1}})
     elif profile:
         await db.partner_profiles.update_one({"user_id": job["partner_id"]}, {"$inc": {"total_clicks": 1}})
 
