@@ -1,9 +1,9 @@
-import os
 import logging
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from config import get_frontend_url
 from database import get_database
 from email_service import build_alert_html, send_alert_email
 from campaign_lifecycle import fetch_public_job_filter, is_campaign_diffusible
@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
-APP_URL = os.environ.get("FRONTEND_URL", "https://job-platform-next.preview.emergentagent.com")
+# P0-008 : source canonique (config.get_frontend_url) — même défaut que
+# l'historique pour ne pas changer le comportement des emails générés.
+APP_URL = get_frontend_url()
 
 
 def _build_job_query(alert: dict, since: datetime, public_filter: dict) -> dict:
