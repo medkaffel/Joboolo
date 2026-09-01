@@ -1,0 +1,66 @@
+name: P0-007 validation
+
+on:
+  push:
+    branches:
+      - opencode/issue-14-33562077753
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  p0-007:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      P005_REPLICA_SET_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0
+      P005_STANDALONE_URL: mongodb://127.0.0.1:27018
+      MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0
+      DB_NAME: joboolo_p007_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start MongoDB 7 replica set and standalone
+        run: |
+          docker run -d --name mongo-rs -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
+          docker run -d --name mongo-standalone -p 27018:27017 mongo:7 --bind_ip_all
+          for i in {1..30}; do
+            if docker exec mongo-rs mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1; then break; fi
+            sleep 2
+          done
+          docker exec mongo-rs mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for i in {1..30}; do
+            if docker exec mongo-rs mongosh --quiet --eval 'rs.status().myState' | grep -q 1; then break; fi
+            sleep 2
+          done
+          for i in {1..30}; do
+            if docker exec mongo-standalone mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1; then break; fi
+            sleep 2
+          done
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-xdist motor pymongo fastapi pydantic httpx requests python-multipart passlib[bcrypt] python-jose[cryptography]
+
+      - name: Compile backend
+        run: python -m compileall backend
+
+      - name: Run P0 deterministic and Mongo validation
+        working-directory: backend
+        run: |
+          python -m pytest -n 0 -q \
+            tests/test_p0_007_identity.py \
+            tests/test_p0_006_mongo_integration.py \
+            tests/test_p0_005_mongo_integration.py \
+            tests/test_p0_005_premium_enforcement.py \
+            tests/test_p0_006_lifecycle.py \
+            tests/test_p0_006_scheduler_query.py \
+            tests/test_p0_006_payments_dates.py \
+            tests/test_cpc_concurrency.py \
+            tests/test_cpc_stress.py
