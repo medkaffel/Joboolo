@@ -276,7 +276,7 @@ class _ProxyDB:
         return getattr(self._real_db, name)
 
 
-def _wire_jobs(jobs_module, db, client):
+async def _wire_jobs(jobs_module, db, client):
     async def _get_database():
         return db
 
