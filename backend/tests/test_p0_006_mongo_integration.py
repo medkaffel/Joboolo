@@ -280,6 +280,21 @@ def _mongo_available():
     return asyncio.run(_probe())
 
 
+def _check_replica_set():
+    """True si MONGO_URL est un replica set capable de transactions."""
+    async def _probe():
+        client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=3000)
+        try:
+            await client.admin.command("ping")
+            hello = await client.admin.command("hello")
+            return hello.get("setName") is not None
+        except Exception:
+            return False
+        finally:
+            client.close()
+    return asyncio.run(_probe())
+
+
 # --------------------------------------------------------------------------- #
 # Helpers                                                                     #
 # --------------------------------------------------------------------------- #
@@ -316,6 +331,22 @@ def _job_doc(jid, **kw):
 
 async def _wire(db, module):
     module.get_database = (lambda: _Awaited(db))
+
+
+P0007_MARKER = "p0007_identity_indexes"
+P0007_INDEX_NAME = "p0007_identity_unique"
+
+
+async def _seed_p0007_identity(db):
+    """Seed la précondition P0-007 requise pour toute import de campagne :
+    crée l'index unique partiel PUIS pose le marqueur (ordre imposé)."""
+    await db.jobs.create_index(
+        [("partner_id", 1), ("campaign_id", 1), ("external_ref", 1)],
+        name=P0007_INDEX_NAME,
+        unique=True,
+        partialFilterExpression={"campaign_id": {"$type": "string"}},
+    )
+    await db.migration_flags.insert_one({"_id": P0007_MARKER, "applied_at": datetime.utcnow()})
 
 
 class _Awaited:
@@ -756,6 +787,7 @@ class TestImports:
                 assert (await db.import_logs.count_documents({})) == 0
 
                 camp_active = await db.campaigns.find_one({"_id": "active"})
+                await _seed_p0007_identity(db)
                 res = await feed_module.import_campaign_feed(db, camp_active, xml, trigger="manual")
                 assert res["imported"] == 1
             finally:
@@ -765,8 +797,8 @@ class TestImports:
         _run(scenario())
 
     def test_per_posting_new_job_gets_expires_at_not_renewed_on_update(self, feed_module):
-        if not _mongo_available():
-            pytest.skip("MongoDB not available")
+        if not _check_replica_set():
+            pytest.skip("Replica-set MongoDB (transactions) not available")
 
         async def scenario():
             client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=3000)
@@ -777,6 +809,11 @@ class TestImports:
                 await db.campaigns.insert_one(_camp_doc("active", billing_mode="per_posting",
                                                         validity_days=30))
                 await _wire(db, feed_module)
+                # P0-007 : le per_posting de campagne (replica set) exige l'index
+                # unique + marqueur, et un client Mongo réel pour la sonde de
+                # transactions (fail-closed 503 sinon).
+                await _seed_p0007_identity(db)
+                sys.modules["database"].get_client = lambda: client
                 xml1 = "<joboolo><ad><id>1</id><title>Job</title><content>d</content><city>Paris</city><contract>CDI</contract><url>https://x/j</url></ad></joboolo>"
 
                 camp = await db.campaigns.find_one({"_id": "active"})
