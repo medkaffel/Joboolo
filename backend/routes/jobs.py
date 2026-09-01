@@ -13,6 +13,29 @@ import re
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+class InsufficientPremiumCredits(Exception):
+    """Signal interne : la décrémentation conditionnelle du crédit a échoué."""
+
+
+def _is_unsupported_transaction(exc: Exception) -> bool:
+    """Détecte une erreur Mongo signalant que les transactions (replica set) ne
+    sont pas supportées par la topologie runtime, pour fail-closed 503."""
+    text = str(exc)
+    lowered = text.lower()
+    markers = (
+        "replica set",
+        "replicaset",
+        "transaction numbers",
+        "do not support transactions",
+        "not supported on standalone",
+        "standalone",
+        "no such command: 'commitTransaction'",
+        "session support",
+        "mongos",
+    )
+    return any(m in lowered for m in markers)
+
+
 async def _resolve_logo(job_doc: dict, db):
     """Logo affiché sur l'offre : logo de la campagne, sinon logo du partenaire."""
     if not job_doc.get("is_partner"):
@@ -87,6 +110,7 @@ async def populate_job_response(job_doc: dict, db) -> JobResponse:
         benefits=job_doc.get("benefits", []),
         tags=job_doc.get("tags", []),
         is_active=job_doc.get("is_active", True),
+        is_premium=job_doc.get("is_premium", False),
         views_count=job_doc.get("views_count", 0),
         applications_count=job_doc.get("applications_count", 0),
         created_at=job_doc["created_at"],
@@ -267,21 +291,67 @@ async def create_job(
             detail="You can only post jobs for companies you own"
         )
     
+    is_premium = bool(getattr(job_data, "is_premium", False))
+
     # Create job document
     job_doc = {
         "_id": f"job_{datetime.utcnow().timestamp()}",
         **job_data.dict(),
         "employer_id": current_user.id,
         "is_active": True,
+        "is_premium": is_premium,
+        "premium_granted_at": datetime.utcnow() if is_premium else None,
         "views_count": 0,
         "applications_count": 0,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }
-    
-    # Insert job
-    await db.jobs.insert_one(job_doc)
-    
+    if is_premium:
+        # P0-005 : la publication Premium consomme exactement 1 crédit recruteur.
+        # Consommation et insertion sont atomiques dans une transaction Mongo
+        # multi-documents (users + jobs) : commit => les deux réussissent,
+        # abort => aucun crédit consommé et aucun job créé. La topologie runtime
+        # n'est pas supposée : si elle ne supporte pas les transactions on
+        # FAIL CLOSED (503) sans débit ni insertion, jamais de fallback best-effort.
+        # Import lazy : n'est résolu qu'au moment d'une création Premium, pour ne
+        # pas imposer get_client au chargement du module (les tests existants qui
+        # n'utilisent pas de transactions n'ont pas besoin de ce symbole).
+        from database import get_client
+        client = get_client()
+        if client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Base de données indisponible.",
+            )
+        try:
+            async with await client.start_session() as session:
+                async with session.start_transaction():
+                    credit = await db.users.update_one(
+                        {"_id": current_user.id, "premium_credits": {"$gte": 1}},
+                        {"$inc": {"premium_credits": -1}},
+                        session=session,
+                    )
+                    if credit.modified_count == 0:
+                        # Lève hors de la transaction : le context manager l'abort,
+                        # aucun crédit consommé et aucun job créé.
+                        raise InsufficientPremiumCredits()
+                    await db.jobs.insert_one(job_doc, session=session)
+        except InsufficientPremiumCredits:
+            raise HTTPException(
+                status_code=402,
+                detail="Crédits premium insuffisants. Veuillez acheter un pack d'offres Premium.",
+            )
+        except Exception as exc:
+            if _is_unsupported_transaction(exc):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Les transactions MongoDB ne sont pas disponibles. Publication Premium momentanément indisponible. Aucun crédit n'a été débité.",
+                )
+            raise
+    else:
+        # Offre standard : aucune consommation de crédit, comportement inchangé.
+        await db.jobs.insert_one(job_doc)
+
     return await populate_job_response(job_doc, db)
 
 @router.put("/{job_id}", response_model=JobResponse)
