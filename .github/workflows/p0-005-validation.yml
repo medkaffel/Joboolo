@@ -69,3 +69,5 @@ jobs:
           backend/tests/test_cpc_concurrency.py
           backend/tests/test_cpc_stress.py
           backend/tests/test_cpc_mongo_integration.py
+
+# validation rerun after rollback-test fix
