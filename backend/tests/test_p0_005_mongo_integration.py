@@ -250,7 +250,33 @@ def _current_user():
     return _Model(id=USER_ID, user_type="employer", is_active=True, email=EMAIL)
 
 
-async def _wire_jobs(jobs_module, db, client):
+class _FailingJobsCollection:
+    """Proxy that raises OSError on insert_one, forwards find to real collection."""
+
+    def __init__(self, real_collection):
+        self._real = real_collection
+
+    async def insert_one(self, document, session=None):
+        raise OSError("simulated insert failure")
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class _ProxyDB:
+    """Proxy DB: intercepts .jobs access to return _FailingJobsCollection, forwards everything else."""
+
+    def __init__(self, real_db, failing_collection):
+        self._real_db = real_db
+        self._jobs = failing_collection
+
+    def __getattr__(self, name):
+        if name == "jobs":
+            return self._jobs
+        return getattr(self._real_db, name)
+
+
+def _wire_jobs(jobs_module, db, client):
     async def _get_database():
         return db
 
@@ -311,21 +337,14 @@ class TestReplicaSetTransactions:
             try:
                 await _seed_user(db, premium_credits=1)
                 await _seed_company(db)
-                await _wire_jobs(jobs_module, db, client)
 
-                original_insert = db.jobs.insert_one
-
-                async def failing_insert(document, session=None):
-                    raise OSError("simulated insert failure")
-
-                db.jobs.insert_one = failing_insert
+                proxy_db = _ProxyDB(db, _FailingJobsCollection(db.jobs))
+                await _wire_jobs(jobs_module, proxy_db, client)
 
                 with pytest.raises(OSError):
                     await jobs_module.create_job(
                         _make_job_data(is_premium=True), _current_user()
                     )
-
-                db.jobs.insert_one = original_insert
 
                 user = await db.users.find_one({"_id": USER_ID})
                 assert user["premium_credits"] == 1
