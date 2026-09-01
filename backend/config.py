@@ -40,6 +40,25 @@ ENV_SECRET_KEY = "SECRET_KEY"
 ENV_STRIPE_SECRET_KEY = "STRIPE_SECRET_KEY"
 ENV_STRIPE_WEBHOOK_SECRET = "STRIPE_WEBHOOK_SECRET"
 
+# P0-008 — origine canonique du tracker d'alertes.
+# Même défaut que l'historique scheduler.APP_URL pour ne changer aucun
+# comportement de génération d'emails.
+ENV_FRONTEND_URL = "FRONTEND_URL"
+DEFAULT_FRONTEND_URL = "https://job-platform-next.preview.emergentagent.com"
+
+
+def get_frontend_url() -> str:
+    """URL canonique de l'application, jamais le Host de la requête.
+
+    Source unique de l'origine autorisée pour le tracker d'alertes (P0-008) et
+    de la génération des emails. Une valeur absente ou vide retombe sur le
+    défaut historique. Ne lève jamais et ne lit aucun secret.
+    """
+    value = os.environ.get(ENV_FRONTEND_URL)
+    if value is not None and value.strip():
+        return value.strip()
+    return DEFAULT_FRONTEND_URL
+
 
 class ConfigurationError(RuntimeError):
     """Erreur explicite de configuration P0-001, ne contenant aucun secret."""
