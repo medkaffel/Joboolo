@@ -280,6 +280,33 @@ def _mongo_available():
     return asyncio.run(_probe())
 
 
+def _check_replica_set():
+    """Return True if the Mongo server supports transactions (replica set)."""
+    async def _probe():
+        client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=2000)
+        try:
+            await client.admin.command("ping")
+            hello = await client.admin.command("hello")
+            return hello.get("setName") is not None
+        except Exception:
+            return False
+        finally:
+            client.close()
+    return asyncio.run(_probe())
+
+
+async def _seed_p0007_deployment(db):
+    """P0-007 : marqueur + index unique conditionnel (précondition des imports
+    de campagne). Posé manuellement ici comme le ferait la migration explicite
+    `scripts/migrate_p0007_identity_indexes.py`."""
+    await db.migration_flags.insert_one({"_id": "p0007_identity_indexes",
+                                         "applied_at": datetime.utcnow()})
+    await db.jobs.create_index(
+        [("partner_id", 1), ("campaign_id", 1), ("external_ref", 1)],
+        name="p0007_identity_unique", unique=True,
+        partialFilterExpression={"campaign_id": {"$type": "string"}})
+
+
 # --------------------------------------------------------------------------- #
 # Helpers                                                                     #
 # --------------------------------------------------------------------------- #
@@ -740,6 +767,9 @@ class TestImports:
                 await db.partner_profiles.insert_one(_partner_doc())
                 await db.campaigns.insert_one(_camp_doc("paused", status="paused"))
                 await db.campaigns.insert_one(_camp_doc("active"))
+                # P0-007 : l'import réussi d'une campagne exige que la migration
+                # explicite (marqueur + index) ait été déployée.
+                await _seed_p0007_deployment(db)
                 await _wire(db, feed_module)
 
                 xml = "<joboolo><ad><id>1</id><title>Job</title><content>d</content><city>Paris</city><contract>CDI</contract><url>https://x/j</url></ad></joboolo>"
@@ -765,8 +795,12 @@ class TestImports:
         _run(scenario())
 
     def test_per_posting_new_job_gets_expires_at_not_renewed_on_update(self, feed_module):
+        # P0-007 : le per_posting de campagne passe par une transaction Mongo
+        # (replica set requis). Sans replica set => test skipé (fail-closed 503).
         if not _mongo_available():
             pytest.skip("MongoDB not available")
+        if not _check_replica_set():
+            pytest.skip("Replica-set MongoDB required for per_posting transactions")
 
         async def scenario():
             client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=3000)
@@ -776,6 +810,7 @@ class TestImports:
                 await db.partner_profiles.insert_one(_partner_doc(billing_mode="per_posting"))
                 await db.campaigns.insert_one(_camp_doc("active", billing_mode="per_posting",
                                                         validity_days=30))
+                await _seed_p0007_deployment(db)
                 await _wire(db, feed_module)
                 xml1 = "<joboolo><ad><id>1</id><title>Job</title><content>d</content><city>Paris</city><contract>CDI</contract><url>https://x/j</url></ad></joboolo>"
 

@@ -62,3 +62,25 @@ async def create_indexes():
     
     # Saved jobs collection indexes
     await db.saved_jobs.create_index([("user_id", 1), ("job_id", 1)], unique=True)
+
+    # P0-007 : identité des offres de feed d'une campagne = triplet
+    # (partner_id, campaign_id, external_ref) <=> au plus UN job par campagne
+    # et par référence (l'import d'un same external_ref réutilise le même job,
+    # jamais un doublon, même sous concurrence).
+    #
+    # Déploiement sûr en DEUX PHASES : le script EXPLICITE et idempotent
+    # `scripts/migrate_p0007_identity_indexes.py` déduplique d'abord les jobs
+    # existants (consolidation applications/saved_jobs/events, recomputation des
+    # compteurs) puis pose le marqueur `p0007_identity_indexes`. Ce startup ne
+    # fait JAMAIS de migration destructive : il matérialise simplement l'index
+    # unique lorsqu'une migration antérieure (ou l'opérateur) a posé le marqueur.
+    # Avant ce marqueur, les créations de jobs de campagne sont fail-closed (503)
+    # dans partner_feed.import_feed -> aucune fenêtre de doublons concurrents.
+    marker = await db.migration_flags.find_one({"_id": "p0007_identity_indexes"})
+    if marker:
+        await db.jobs.create_index(
+            [("partner_id", 1), ("campaign_id", 1), ("external_ref", 1)],
+            name="p0007_identity_unique",
+            unique=True,
+            partialFilterExpression={"campaign_id": {"$type": "string"}},
+        )
