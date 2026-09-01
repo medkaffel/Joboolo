@@ -1,0 +1,32 @@
+name: P0-004 deep validation
+
+on:
+  push:
+    branches:
+      - opencode/issue-6-33527053985
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install isolated test dependency
+        run: python -m pip install --upgrade pytest
+
+      - name: Compile changed Python files
+        run: |
+          python -m py_compile backend/routes/jobs.py
+          python -m py_compile backend/tests/test_cpc_concurrency.py
+          python -m py_compile backend/tests/test_cpc_stress.py
+
+      - name: Run P0-004 isolated and stress tests
+        run: python -m pytest -q backend/tests/test_cpc_concurrency.py backend/tests/test_cpc_stress.py
