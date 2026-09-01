@@ -14,6 +14,7 @@ jobs:
     permissions:
       contents: write
       issues: write
+      pull-requests: read
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -38,16 +39,38 @@ jobs:
           opencode models opencode --refresh | tee /tmp/models.txt
           grep -Fx "$MODEL" /tmp/models.txt
 
-      - name: Build issue context
+      - name: Build thread context
         id: context
         shell: bash
         run: |
-          ISSUE_NUMBER="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+          NUMBER="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
           COMMENT_BODY="$(jq -r '.comment.body' "$GITHUB_EVENT_PATH")"
+          IS_PR="$(jq -r 'if .issue.pull_request then "true" else "false" end' "$GITHUB_EVENT_PATH")"
 
-          gh issue view "$ISSUE_NUMBER" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json number,title,body,comments > /tmp/issue.json
+          if [ "$IS_PR" = "true" ]; then
+            gh pr view "$NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json number,title,body,comments,headRefName,baseRefName > /tmp/thread-full.json
+          else
+            gh issue view "$NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json number,title,body,comments > /tmp/thread-full.json
+          fi
+
+          # Keep the context useful but bounded. Full historical agent outputs can
+          # become very large; the repository plus the latest comments are the
+          # source of truth for a new run.
+          jq '{
+            number,
+            title,
+            body: ((.body // "")[0:12000]),
+            headRefName,
+            baseRefName,
+            comments: ((.comments // [])[-4:] | map({
+              author: (.author.login // "unknown"),
+              body: ((.body // "")[0:8000])
+            }))
+          }' /tmp/thread-full.json > /tmp/thread.json
 
           if printf '%s' "$COMMENT_BODY" | grep -Eiq '^/(oc|opencode)[[:space:]]+build\b|\bBUILD\b'; then
             MODE="build"
@@ -56,28 +79,44 @@ jobs:
           fi
 
           {
-            echo "You are working on GitHub issue #$ISSUE_NUMBER in $GITHUB_REPOSITORY."
+            echo "You are working on GitHub $([ "$IS_PR" = "true" ] && echo "pull request" || echo "issue") #$NUMBER in $GITHUB_REPOSITORY."
             echo
             echo "Read AGENTS.md, ARCHITECTURE.md, BUSINESS_RULES.md, TESTING.md and P0_AUDIT.md when present."
             echo
-            echo "GitHub issue context:"
-            cat /tmp/issue.json
+            echo "GitHub thread context (compact; inspect the repository for full source-of-truth details):"
+            cat /tmp/thread.json
             echo
             echo "Latest user command:"
             printf '%s\n' "$COMMENT_BODY"
             echo
             if [ "$MODE" = "plan" ]; then
               echo "MODE: PLAN ONLY. Read and analyze the repository. Do not modify files, commit, push, or create a PR. Return a concrete implementation plan and blockers."
+            elif [ "$IS_PR" = "true" ]; then
+              echo "MODE: BUILD CORRECTION ON EXISTING PR. The workflow checks out the PR head branch. Apply only the requested corrections, update/add tests, and leave the working tree ready to commit. Do not create another branch or PR and do not push yourself."
             else
               echo "MODE: BUILD. Implement only the requested issue scope, add/update tests, and leave the working tree with the requested changes. Do not push or create a PR yourself; the workflow handles the branch and ChatGPT creates/reviews the PR."
             fi
           } > /tmp/opencode-prompt.txt
 
-          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "issue_number=$NUMBER" >> "$GITHUB_OUTPUT"
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "is_pr=$IS_PR" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR branch for correction
+        if: steps.context.outputs.mode == 'build' && steps.context.outputs.is_pr == 'true'
+        shell: bash
+        run: |
+          BRANCH="$(jq -r '.headRefName' /tmp/thread.json)"
+          if [ -z "$BRANCH" ] || [ "$BRANCH" = "null" ]; then
+            echo "Unable to resolve PR head branch" >&2
+            exit 1
+          fi
+          git fetch origin "$BRANCH"
+          git checkout -B "$BRANCH" "origin/$BRANCH"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
 
       - name: Create build branch
-        if: steps.context.outputs.mode == 'build'
+        if: steps.context.outputs.mode == 'build' && steps.context.outputs.is_pr != 'true'
         shell: bash
         run: |
           BRANCH="opencode/issue-${{ steps.context.outputs.issue_number }}-${GITHUB_RUN_ID}"
@@ -92,7 +131,8 @@ jobs:
           NO_COLOR=1 opencode run \
             --agent plan \
             --model "$MODEL" \
-            "$(cat /tmp/opencode-prompt.txt)" | tee /tmp/opencode-output.txt
+            --file /tmp/opencode-prompt.txt \
+            "Read the attached task context and execute it exactly." | tee /tmp/opencode-output.txt
 
       - name: Run OpenCode build
         if: steps.context.outputs.mode == 'build'
@@ -102,7 +142,8 @@ jobs:
           NO_COLOR=1 opencode run \
             --agent build \
             --model "$MODEL" \
-            "$(cat /tmp/opencode-prompt.txt)" | tee /tmp/opencode-output.txt
+            --file /tmp/opencode-prompt.txt \
+            "Read the attached task context and execute it exactly." | tee /tmp/opencode-output.txt
 
       - name: Publish plan response
         if: steps.context.outputs.mode == 'plan'
@@ -133,7 +174,11 @@ jobs:
           {
             cat /tmp/opencode-output.txt
             echo
-            echo "Branch ready for ChatGPT PR creation/review: $BRANCH"
+            if [ "${{ steps.context.outputs.is_pr }}" = "true" ]; then
+              echo "Existing PR branch updated for ChatGPT review: $BRANCH"
+            else
+              echo "Branch ready for ChatGPT PR creation/review: $BRANCH"
+            fi
           } > /tmp/opencode-build-comment.txt
 
           gh issue comment "${{ steps.context.outputs.issue_number }}" \
