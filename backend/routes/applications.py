@@ -4,12 +4,33 @@ from pydantic import BaseModel
 from models import (
     Application, ApplicationCreate, ApplicationResponse, User, UserType
 )
-from database import get_database
+from database import get_database, get_client
 from auth import get_current_active_user, require_employer
 from datetime import datetime
-from campaign_lifecycle import is_job_publicly_visible, get_job_campaign
+from campaign_lifecycle import is_job_publicly_visible
+from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/applications", tags=["applications"])
+
+
+def _is_unsupported_transaction(exc: Exception) -> bool:
+    """Détecte une erreur Mongo signalant que les transactions (replica set) ne
+    sont pas supportées par la topologie runtime, pour fail-closed 503."""
+    text = str(exc)
+    lowered = text.lower()
+    markers = (
+        "replica set",
+        "replicaset",
+        "transaction numbers",
+        "do not support transactions",
+        "not supported on standalone",
+        "standalone",
+        "no such command: 'commitTransaction'",
+        "session support",
+        "mongos",
+    )
+    return any(m in lowered for m in markers)
+
 
 async def populate_application_response(app_doc: dict, db, include_candidate: bool = False) -> ApplicationResponse:
     """Populate application response with job and candidate info"""
@@ -68,54 +89,135 @@ async def apply_to_job(
     application_data: ApplicationCreate,
     current_user: User = Depends(get_current_active_user)
 ):
-    """Apply to a job (candidates only)"""
+    """Apply to a job (candidates only) — atomic and idempotent (P0-014)."""
     if current_user.user_type != UserType.CANDIDATE:
         raise HTTPException(
             status_code=403,
             detail="Only candidates can apply to jobs"
         )
-    
+
     db = await get_database()
-    
-    # Check if job exists and is publicly visible (P0-006)
-    job = await db.jobs.find_one({"_id": application_data.job_id})
-    if not job or not is_job_publicly_visible(job, await get_job_campaign(db, job)):
+    job_id = application_data.job_id
+    candidate_id = current_user.id
+
+    # Fast-path pre-check outside transaction: avoid transaction overhead for
+    # obvious rejections (missing job, already applied). These are best-effort;
+    # authoritative checks happen inside the transaction.
+    existing_application = await db.applications.find_one({
+        "job_id": job_id,
+        "candidate_id": candidate_id
+    })
+    if existing_application:
+        return await populate_application_response(existing_application, db)
+
+    job = await db.jobs.find_one({"_id": job_id})
+    if not job:
         raise HTTPException(
             status_code=404,
             detail="Job not found or no longer active"
         )
-    
-    # Check if user already applied
-    existing_application = await db.applications.find_one({
-        "job_id": application_data.job_id,
-        "candidate_id": current_user.id
-    })
-    if existing_application:
+    campaign = await get_job_campaign(db, job)
+    if not is_job_publicly_visible(job, campaign):
         raise HTTPException(
-            status_code=400,
-            detail="You have already applied to this job"
+            status_code=404,
+            detail="Job not found or no longer active"
         )
-    
-    # Create application document
+
+    # Prepare application document (ID generated once for idempotency)
+    app_id = f"app_{datetime.utcnow().timestamp()}"
+    now = datetime.utcnow()
     app_doc = {
-        "_id": f"app_{datetime.utcnow().timestamp()}",
+        "_id": app_id,
         **application_data.dict(),
-        "candidate_id": current_user.id,
+        "candidate_id": candidate_id,
         "status": "pending",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "created_at": now,
+        "updated_at": now
     }
-    
-    # Insert application
-    await db.applications.insert_one(app_doc)
-    
-    # Increment job applications count
-    await db.jobs.update_one(
-        {"_id": application_data.job_id},
-        {"$inc": {"applications_count": 1}}
-    )
+
+    client = get_client()
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Base de données indisponible.",
+        )
+
+    async def _tx(session):
+        # Authoritative read of job and campaign WITHIN the transaction
+        job_tx = await db.jobs.find_one({"_id": job_id}, session=session)
+        if not job_tx:
+            raise HTTPException(
+                status_code=404,
+                detail="Job not found or no longer active"
+            )
+        # Read campaign within the same transaction (get_job_campaign does not
+        # accept session; replicate its logic here for transactional isolation).
+        cid = job_tx.get("campaign_id")
+        campaign_tx = await db.campaigns.find_one({"_id": cid}, session=session) if cid else None
+        if not is_job_publicly_visible(job_tx, campaign_tx):
+            raise HTTPException(
+                status_code=404,
+                detail="Job not found or no longer active"
+            )
+
+        # Insert application (unique index on (job_id, candidate_id) enforces
+        # at-most-once). DuplicateKeyError => concurrent winner; outer catch
+        # will re-lookup and return existing.
+        await db.applications.insert_one(app_doc, session=session)
+
+        # Increment counter atomically with authoritative job existence +
+        # eligibility check (is_active=True). If matched_count != 1, the job
+        # disappeared or was deactivated between pre-check and commit => abort.
+        result = await db.jobs.update_one(
+            {"_id": job_id, "is_active": True},
+            {"$inc": {"applications_count": 1}},
+            session=session,
+        )
+        if result.matched_count != 1:
+            # Job deleted or deactivated concurrently => abort transaction:
+            # no application, no counter increment.
+            raise HTTPException(
+                status_code=404,
+                detail="Job not found or no longer active"
+            )
+
+        return app_doc
+
+    try:
+        async with await client.start_session() as session:
+            committed_app = await session.with_transaction(_tx)
+    except DuplicateKeyError:
+        # Concurrent insertion won the race (case a): another request inserted
+        # the same (job_id, candidate_id). Transaction aborted, no $inc applied.
+        # Re-lookup existing application and return it (idempotent response).
+        existing = await db.applications.find_one({
+            "job_id": job_id,
+            "candidate_id": candidate_id
+        })
+        if existing:
+            return await populate_application_response(existing, db)
+        # Should not happen: unique index guarantees existence on DuplicateKeyError
+        raise HTTPException(
+            status_code=409,
+            detail="Concurrent application conflict"
+        )
+    except HTTPException:
+        # Re-raise HTTPException (e.g., 404 from matched_count check)
+        raise
+    except Exception as exc:
+        if _is_unsupported_transaction(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="Les transactions MongoDB ne sont pas disponibles. Candidature momentanément indisponible.",
+            )
+        # UnknownTransactionCommitResult or other transient error: driver
+        # handles commit retry. If a new HTTP call arrives, fast-path pre-check
+        # will find the existing application (case b) and return it without
+        # re-executing the transaction.
+        raise
 
     # Best-effort notification emails (candidate confirmation + employer alert)
+    # Use the job read from the pre-check (authoritative at write time was in tx).
     try:
         from email_service import (
             build_application_confirmation_email, build_new_application_email, send_alert_email
@@ -133,12 +235,12 @@ async def apply_to_job(
         if employer and employer.get("email"):
             emp_name = employer.get("first_name") or "recruteur"
             full_cand = f"{current_user.first_name or ''} {current_user.last_name or ''}".strip() or "Un candidat"
-            subj2, html2 = build_new_application_email(emp_name, full_cand, job.get("title", "l'offre"), application_data.job_id, APP_URL)
+            subj2, html2 = build_new_application_email(emp_name, full_cand, job.get("title", "l'offre"), job_id, APP_URL)
             await send_alert_email(employer["email"], subj2, html2)
     except Exception:
         pass
 
-    return await populate_application_response(app_doc, db)
+    return await populate_application_response(committed_app, db)
 
 @router.get("", response_model=List[ApplicationResponse])
 async def get_my_applications(current_user: User = Depends(get_current_active_user)):
