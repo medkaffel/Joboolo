@@ -6,8 +6,13 @@ forme canonique ``strip().lower()``.
 
 Sûreté:
 - Dry-run par défaut : aucune écriture sans ``--apply``.
+- Inventaire COMPLET de TOUS les users (y compris email absent/non-string).
+  Tout email non-string, absent, vide ou whitespace-only est un BLOCKER.
 - Détecte les doublons canoniques AVANT toute réécriture et ABOURT si
   des collisions sont trouvées (fail-closed, zéro write).
+- Chaque update utilise CAS (compare-and-set) : filtre
+  ``{"_id": id, "email": old_email}`` et vérifie ``matched_count == 1``.
+- POST-VERIFY complet avant de poser le marker.
 - Ne modifie JAMAIS les ``_id`` ni les FK (candidate_id, user_id, owner_id).
 - Ne crée PAS / supprime PAS d'index ``users.email`` existant.
 - Marqueur ``p0009_email_normalization`` posé APRES la vérification et
@@ -15,6 +20,8 @@ Sûreté:
 - Aucun flag ne peut bypasser le fail-closed sur collisions.
 - L'inventaire couvre TOUS les users via un curseur streaming (pas de
   troncation).
+- Le marker existant ne masque pas une base incohérente : un postverify
+  complet est effectué avant de retourner ``already_migrated``.
 
 Usage:
     # Dry-run (défaut)
@@ -46,37 +53,57 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-async def _migrate(db, *, dry_run: bool = True) -> dict:
-    """Run the migration. Returns a report dict."""
-    import datetime as _dt
+def _is_invalid_email(email_value):
+    """Check if an email value is invalid (not a string, missing, empty, or whitespace-only)."""
+    if email_value is None:
+        return True
+    if not isinstance(email_value, str):
+        return True
+    if not email_value.strip():
+        return True
+    return False
 
-    report = {
-        "dry_run": dry_run,
-        "total_users": 0,
-        "already_canonical": 0,
-        "to_update": 0,
-        "collisions": 0,
-        "updated": 0,
-        "marker_set": False,
-        "already_migrated": False,
-        "collision_details": [],
-    }
 
-    # Check if already migrated
-    marker = await db.migration_flags.find_one({"_id": P0009_MARKER})
-    if marker:
-        report["already_migrated"] = True
-        logger.info("Already migrated (marker present).")
-        return report
+def _is_already_canonical(email_value):
+    """Check if an email is already in canonical form."""
+    if _is_invalid_email(email_value):
+        return False
+    canonical = canonical_email(email_value)
+    return email_value == canonical
 
-    # Aggregate: group by canonical email to detect collisions.
-    # Use a streaming cursor (no to_list truncation) to cover ALL users.
+
+def _compute_canonical(email_value):
+    """Compute canonical form, returning None for invalid emails."""
+    if _is_invalid_email(email_value):
+        return None
+    return canonical_email(email_value)
+
+
+async def _inventory_all_users(db):
+    """Inventory ALL users via streaming cursor. Returns:
+    - invalid_users: list of docs with non-string/absent/empty/whitespace emails
+    - canonical_groups: dict of canonical_email -> list of {id, email} docs
+    - total_users: total count
+    """
+    invalid_users = []
+    canonical_groups = {}
+    total_users = 0
+
     pipeline = [
-        {"$match": {"email": {"$type": "string"}}},
         {
             "$addFields": {
                 "_email_canonical": {
-                    "$toLower": {"$trim": {"input": "$email"}}
+                    "$cond": {
+                        "if": {"$eq": [{"$type": "$email"}, "string"]},
+                        "then": {
+                            "$cond": {
+                                "if": {"$eq": [{"$trim": {"input": "$email"}}, ""]},
+                                "then": None,
+                                "else": {"$toLower": {"$trim": {"input": "$email"}}},
+                            }
+                        },
+                        "else": None,
+                    }
                 }
             }
         },
@@ -91,33 +118,184 @@ async def _migrate(db, *, dry_run: bool = True) -> dict:
     ]
 
     cursor = db.users.aggregate(pipeline)
-    to_update = []
-    collisions = []
+    async for group in cursor:
+        canonical = group["_id"]
+        count = group["count"]
+        ids = group["ids"]
+        emails = group["emails"]
+        total_users += count
 
+        if canonical is None:
+            # All docs in this group have invalid emails
+            for uid, email_val in zip(ids, emails):
+                invalid_users.append({"_id": uid, "email": email_val})
+            continue
+
+        if count > 1:
+            # Collision: multiple users share canonical email
+            if canonical not in canonical_groups:
+                canonical_groups[canonical] = []
+            for uid, email_val in zip(ids, emails):
+                canonical_groups[canonical].append({"_id": uid, "email": email_val})
+        else:
+            # Single user: track for potential update
+            if canonical not in canonical_groups:
+                canonical_groups[canonical] = []
+            for uid, email_val in zip(ids, emails):
+                canonical_groups[canonical].append({"_id": uid, "email": email_val})
+
+    return invalid_users, canonical_groups, total_users
+
+
+async def _post_verify(db):
+    """Post-verify: re-run complete inventory and confirm everything is clean.
+    Returns (ok, errors_list).
+    """
+    errors = []
+
+    pipeline = [
+        {
+            "$addFields": {
+                "_email_canonical": {
+                    "$cond": {
+                        "if": {"$eq": [{"$type": "$email"}, "string"]},
+                        "then": {
+                            "$cond": {
+                                "if": {"$eq": [{"$trim": {"input": "$email"}}, ""]},
+                                "then": None,
+                                "else": {"$toLower": {"$trim": {"input": "$email"}}},
+                            }
+                        },
+                        "else": None,
+                    }
+                }
+            }
+        },
+        {
+            "$group": {
+                "_id": "$_email_canonical",
+                "count": {"$sum": 1},
+                "ids": {"$push": "$_id"},
+                "emails": {"$push": "$email"},
+            }
+        },
+    ]
+
+    cursor = db.users.aggregate(pipeline)
     async for group in cursor:
         canonical = group["_id"]
         count = group["count"]
         ids = group["ids"]
         emails = group["emails"]
 
-        report["total_users"] += count
+        if canonical is None:
+            for uid, email_val in zip(ids, emails):
+                errors.append(f"Invalid email on user {uid}: {email_val!r}")
+            continue
 
+        # Check for whitespace-only
+        for uid, email_val in zip(ids, emails):
+            if _is_invalid_email(email_val):
+                errors.append(f"Invalid email on user {uid}: {email_val!r}")
+                continue
+            # Check non-canonical (should be canonical after migration)
+            if email_val != canonical:
+                errors.append(f"Non-canonical email on user {uid}: {email_val!r} != {canonical!r}")
+
+        # Check collisions
+        if count > 1:
+            errors.append(
+                f"Collision on canonical email {canonical!r}: "
+                f"{count} users ({ids})"
+            )
+
+    return len(errors) == 0, errors
+
+
+async def _migrate(db, *, dry_run: bool = True) -> dict:
+    """Run the migration. Returns a report dict."""
+    import datetime as _dt
+
+    report = {
+        "dry_run": dry_run,
+        "total_users": 0,
+        "already_canonical": 0,
+        "to_update": 0,
+        "collisions": 0,
+        "invalid_emails": 0,
+        "updated": 0,
+        "marker_set": False,
+        "already_migrated": False,
+        "collision_details": [],
+        "invalid_email_details": [],
+    }
+
+    # Check if already migrated — BUT do a full postverify first
+    marker = await db.migration_flags.find_one({"_id": P0009_MARKER})
+    if marker:
+        ok, errors = await _post_verify(db)
+        if ok:
+            report["already_migrated"] = True
+            logger.info("Already migrated (marker present, postverify OK).")
+            return report
+        else:
+            # Marker present but base is inconsistent — FAIL
+            logger.error(
+                "MARKER PRESENT BUT POST-VERIFY FAILED: %d inconsistencies. "
+                "Removing marker and re-running.",
+                len(errors),
+            )
+            await db.migration_flags.delete_one({"_id": P0009_MARKER})
+            for e in errors:
+                logger.error("  %s", e)
+            # Continue with migration (marker removed)
+
+    # Phase 1: Full inventory of ALL users (streaming, no truncation)
+    invalid_users, canonical_groups, total_users = await _inventory_all_users(db)
+    report["total_users"] = total_users
+    report["invalid_emails"] = len(invalid_users)
+    report["invalid_email_details"] = [
+        {"_id": u["_id"], "email": u["email"]} for u in invalid_users
+    ]
+
+    # BLOCKER: any invalid email means ZERO writes and ZERO marker
+    if invalid_users:
+        logger.error(
+            "INVALID EMAILS DETECTED: %d users with non-string/absent/empty/whitespace emails.",
+            len(invalid_users),
+        )
+        for u in invalid_users:
+            logger.error("  User %s: email=%r", u["_id"], u["email"])
+        if not dry_run:
+            raise RuntimeError(
+                f"{len(invalid_users)} user(s) have invalid emails. "
+                "Fix manually then relaunch."
+            )
+        return report
+
+    # Phase 2: Detect collisions and build update list
+    to_update = []
+    collisions = []
+
+    for canonical, group in canonical_groups.items():
+        count = len(group)
         if count > 1:
             collisions.append({
                 "canonical_email": canonical,
                 "count": count,
-                "user_ids": ids,
-                "original_emails": emails,
+                "user_ids": [d["_id"] for d in group],
+                "original_emails": [d["email"] for d in group],
             })
             continue
 
         # Single user: check if email is already canonical
-        original = emails[0]
+        doc = group[0]
+        original = doc["email"]
         if original == canonical:
             report["already_canonical"] += 1
         else:
             to_update.append({
-                "_id": ids[0],
+                "_id": doc["_id"],
                 "old_email": original,
                 "new_email": canonical,
             })
@@ -152,15 +330,40 @@ async def _migrate(db, *, dry_run: bool = True) -> dict:
         )
         return report
 
-    # Apply updates
+    # Phase 3: Apply updates with CAS (compare-and-set)
     for item in to_update:
-        await db.users.update_one(
-            {"_id": item["_id"]},
+        result = await db.users.update_one(
+            {"_id": item["_id"], "email": item["old_email"]},
             {"$set": {"email": item["new_email"], "updated_at": _dt.datetime.utcnow()}}
         )
+        if result.matched_count != 1:
+            # CAS mismatch: abort — email changed since inventory
+            logger.error(
+                "CAS MISMATCH: user %s email changed from %r during update. "
+                "Aborting.",
+                item["_id"], item["old_email"],
+            )
+            raise RuntimeError(
+                f"CAS mismatch for user {item['_id']}: email changed during migration."
+            )
         report["updated"] += 1
 
-    # Set marker
+    # Phase 4: Post-verify BEFORE marker
+    ok, errors = await _post_verify(db)
+    if not ok:
+        logger.error(
+            "POST-VERIFY FAILED: %d inconsistencies after update. "
+            "NOT setting marker.",
+            len(errors),
+        )
+        for e in errors:
+            logger.error("  %s", e)
+        raise RuntimeError(
+            f"Post-verify failed with {len(errors)} inconsistencies. "
+            "No marker set."
+        )
+
+    # Phase 5: Set marker (LAST write)
     await db.migration_flags.insert_one({
         "_id": P0009_MARKER,
         "applied_at": _dt.datetime.utcnow(),
@@ -169,6 +372,7 @@ async def _migrate(db, *, dry_run: bool = True) -> dict:
             "updated": report["updated"],
             "already_canonical": report["already_canonical"],
             "collisions": report["collisions"],
+            "invalid_emails": report["invalid_emails"],
         },
     })
     report["marker_set"] = True

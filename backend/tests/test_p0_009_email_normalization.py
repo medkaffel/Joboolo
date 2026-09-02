@@ -267,6 +267,13 @@ class _FakeCollection:
                 return types.SimpleNamespace(matched_count=1, modified_count=1)
         return types.SimpleNamespace(matched_count=0, modified_count=0)
 
+    async def delete_one(self, query, session=None):
+        for i, doc in enumerate(self._docs):
+            if self._matches(doc, query):
+                self._docs.pop(i)
+                return types.SimpleNamespace(deleted_count=1)
+        return types.SimpleNamespace(deleted_count=0)
+
     async def count_documents(self, query):
         return sum(1 for d in self._docs if self._matches(d, query))
 
@@ -656,14 +663,16 @@ class TestMigrationDryRun:
         assert report["already_canonical"] == 2
         assert report["marker_set"] is True
 
-    def test_non_string_email_skipped(self):
+    def test_non_string_email_blocks_dry_run(self):
+        """P0-009: non-string email is a BLOCKER, even in dry-run."""
         db = _FakeDB(users=[
             {"_id": "u1", "email": "foo@example.com"},
-            {"_id": "u2", "email": 12345},  # non-string, skipped by $match
+            {"_id": "u2", "email": 12345},  # non-string → blocker
         ])
         report = _run(self.migrate_module._migrate(db, dry_run=True))
-        assert report["to_update"] == 0
-        assert report["already_canonical"] == 1
+        assert report["invalid_emails"] == 1
+        assert len(report["invalid_email_details"]) == 1
+        assert report["marker_set"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -1958,3 +1967,344 @@ class TestLoginNonLookupErrorNotConverted:
                 assert "Exception" not in stripped or "LookupAggregationError" in stripped
                 in_login_try = False
                 break
+
+
+# --------------------------------------------------------------------------- #
+# 22. P0-009: non-string/absent/empty/whitespace => blocker + no marker        #
+# --------------------------------------------------------------------------- #
+class TestMigrationInvalidEmailsBlocker:
+    """P0-009: invalid emails (non-string, absent, empty, whitespace-only)
+    must be BLOCKERS: zero writes, zero marker, explicit error."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_invalid")
+
+    def test_non_string_email_blocks_dry_run(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "foo@example.com"},
+            {"_id": "u2", "email": 12345},
+        ])
+        report = _run(self.migrate_module._migrate(db, dry_run=True))
+        assert report["invalid_emails"] == 1
+        assert len(report["invalid_email_details"]) == 1
+        assert report["invalid_email_details"][0]["_id"] == "u2"
+        assert report["marker_set"] is False
+        assert report["updated"] == 0
+
+    def test_absent_email_blocks_apply(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "foo@example.com"},
+            {"_id": "u2"},
+        ])
+        with pytest.raises(RuntimeError, match="invalid emails"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
+    def test_empty_string_email_blocks_apply(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "foo@example.com"},
+            {"_id": "u2", "email": ""},
+        ])
+        with pytest.raises(RuntimeError, match="invalid emails"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
+    def test_whitespace_only_email_blocks_apply(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "foo@example.com"},
+            {"_id": "u2", "email": "   "},
+        ])
+        with pytest.raises(RuntimeError, match="invalid emails"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
+    def test_all_canonical_with_valid_emails_succeeds(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "foo@example.com"},
+            {"_id": "u2", "email": "bar@example.com"},
+        ])
+        report = _run(self.migrate_module._migrate(db, dry_run=False))
+        assert report["invalid_emails"] == 0
+        assert report["marker_set"] is True
+
+
+# --------------------------------------------------------------------------- #
+# 23. P0-009: CAS mismatch => abort + no marker                               #
+# --------------------------------------------------------------------------- #
+class TestMigrationCASMismatch:
+    """P0-009: CAS mismatch during update must abort with zero marker."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_cas")
+
+    def test_cas_mismatch_aborts_no_marker(self, monkeypatch):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "  Foo@Example.COM "},
+        ])
+
+        # Patch update_one to simulate CAS mismatch: matched_count=0
+        original_update = db.users.update_one
+
+        async def _cas_mismatch(query, update, session=None):
+            return types.SimpleNamespace(matched_count=0, modified_count=0)
+
+        db.users.update_one = _cas_mismatch
+
+        with pytest.raises(RuntimeError, match="CAS mismatch"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
+    def test_cas_success_sets_marker(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "  Foo@Example.COM "},
+        ])
+        report = _run(self.migrate_module._migrate(db, dry_run=False))
+        assert report["updated"] == 1
+        assert report["marker_set"] is True
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["email"] == "foo@example.com"
+
+
+# --------------------------------------------------------------------------- #
+# 24. P0-009: DuplicateKey during update => abort + no marker                  #
+# --------------------------------------------------------------------------- #
+class TestMigrationDuplicateKeyDuringUpdate:
+    """P0-009: DuplicateKeyError during CAS update must abort + no marker."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_dk_update")
+
+    def test_duplicate_key_during_update_aborts(self, monkeypatch):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "  Foo@Example.COM "},
+        ])
+
+        from pymongo.errors import DuplicateKeyError
+        original_update = db.users.update_one
+
+        async def _dk_on_update(query, update, session=None):
+            raise DuplicateKeyError("duplicate key on email index")
+
+        db.users.update_one = _dk_on_update
+
+        with pytest.raises(DuplicateKeyError):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
+
+# --------------------------------------------------------------------------- #
+# 25. P0-009: postverify detects inconsistency => no marker                    #
+# --------------------------------------------------------------------------- #
+class TestMigrationPostVerifyFailsNoMarker:
+    """P0-009: if postverify detects non-canonical or collision after update,
+    the marker must NOT be set."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_postverify")
+
+    def test_postverify_detects_noncanonical_no_marker(self, monkeypatch):
+        """After update, if a user's email is still non-canonical (e.g. concurrent
+        change), postverify must fail and marker must NOT be set."""
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "  Foo@Example.COM "},
+        ])
+
+        # Simulate concurrent email change after the CAS update succeeds
+        original_update = db.users.update_one
+        update_count = 0
+
+        async def _concurrent_change(query, update, session=None):
+            nonlocal update_count
+            result = await original_update(query, update, session)
+            if result.matched_count == 1:
+                update_count += 1
+                # After CAS succeeds, another request changes email back
+                u = await db.users.find_one({"_id": query.get("_id")})
+                if u:
+                    u["email"] = "  STILL NON-CANONICAL  "
+                    # Replace in docs
+                    for i, doc in enumerate(db.users._docs):
+                        if doc.get("_id") == u["_id"]:
+                            db.users._docs[i] = u
+                            break
+            return result
+
+        db.users.update_one = _concurrent_change
+
+        with pytest.raises(RuntimeError, match="Post-verify failed"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
+
+# --------------------------------------------------------------------------- #
+# 26. P0-009: marker present + inconsistent base => fail                       #
+# --------------------------------------------------------------------------- #
+class TestMigrationMarkerPresentInconsistentBase:
+    """P0-009: if marker is present but base is inconsistent, migration must
+    fail (not silently return already_migrated)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_marker_inconsistent")
+
+    def test_marker_present_but_noncanonical_fails(self):
+        """Marker present + non-canonical email => migration runs (marker removed),
+        not returning already_migrated."""
+        db = _FakeDB(
+            users=[
+                {"_id": "u1", "email": "  Foo@Example.COM "},  # non-canonical
+            ],
+            migration_flags=[{"_id": "p0009_email_normalization", "applied_at": datetime.utcnow()}],
+        )
+        # Should NOT return already_migrated — should migrate
+        report = _run(self.migrate_module._migrate(db, dry_run=False))
+        assert report["already_migrated"] is False
+        assert report["updated"] == 1
+        assert report["marker_set"] is True
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["email"] == "foo@example.com"
+
+    def test_marker_present_but_collision_fails(self):
+        """Marker present + collision => error, not already_migrated."""
+        db = _FakeDB(
+            users=[
+                {"_id": "u1", "email": "foo@example.com"},
+                {"_id": "u2", "email": " Foo@Example.COM "},
+            ],
+            migration_flags=[{"_id": "p0009_email_normalization", "applied_at": datetime.utcnow()}],
+        )
+        with pytest.raises(RuntimeError, match="collision"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None  # marker was removed before re-run
+
+
+# --------------------------------------------------------------------------- #
+# 27. P0-009: apply success + rerun idempotent                                #
+# --------------------------------------------------------------------------- #
+class TestMigrationIdempotent:
+    """P0-009: successful apply + rerun should be idempotent."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_idempotent")
+
+    def test_apply_then_rerun_idempotent(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "  Foo@Example.COM "},
+            {"_id": "u2", "email": "bar@example.com"},
+        ])
+        # First run: apply
+        report1 = _run(self.migrate_module._migrate(db, dry_run=False))
+        assert report1["updated"] == 1
+        assert report1["marker_set"] is True
+
+        # Second run: should detect marker + postverify OK
+        report2 = _run(self.migrate_module._migrate(db, dry_run=False))
+        assert report2["already_migrated"] is True
+        assert report2["marker_set"] is False
+
+        # Verify emails unchanged
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["email"] == "foo@example.com"
+
+
+# --------------------------------------------------------------------------- #
+# 28. P0-009: no modification _id/FK/index                                    #
+# --------------------------------------------------------------------------- #
+class TestMigrationNoIdModification:
+    """P0-009: migration must never modify _id or FK fields."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_noid")
+
+    def test_ids_preserved_after_apply(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "  Foo@Example.COM ",
+             "candidate_id": "c1", "user_id": "uid1", "owner_id": "o1"},
+            {"_id": "u2", "email": "bar@example.com",
+             "candidate_id": "c2", "user_id": "uid2", "owner_id": "o2"},
+        ])
+        _run(self.migrate_module._migrate(db, dry_run=False))
+
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["_id"] == "u1"
+        assert u1["candidate_id"] == "c1"
+        assert u1["user_id"] == "uid1"
+        assert u1["owner_id"] == "o1"
+        assert u1["email"] == "foo@example.com"
+
+        u2 = _run(db.users.find_one({"_id": "u2"}))
+        assert u2["_id"] == "u2"
+        assert u2["email"] == "bar@example.com"
+
+    def test_no_index_drop(self):
+        """Migration source must not contain drop_index or dropIndex calls."""
+        source = open(BACKEND_DIR / "scripts" / "migrate_p0009_email_normalization.py").read()
+        assert "drop_index" not in source.lower()
+        assert "dropindex" not in source.lower()
+
+
+# --------------------------------------------------------------------------- #
+# 29. P0-009: canonical_email equivalent validation (not raw $trim/$toLower)   #
+# --------------------------------------------------------------------------- #
+class TestMigrationCanonicalValidation:
+    """P0-009: the migration must use canonical_email() equivalent logic,
+    not raw $trim/$toLower as validation."""
+
+    def test_source_uses_canonical_email_import(self):
+        source = open(BACKEND_DIR / "scripts" / "migrate_p0009_email_normalization.py").read()
+        assert "from email_utils import canonical_email" in source
+
+    def test_whitespace_only_not_migrated_as_canonical(self):
+        """'   ' should be treated as invalid, not rewritten as ''."""
+        migrate_module = None
+        import importlib.util
+        monkeypatch = pytest.MonkeyPatch()
+        _install_stubs(monkeypatch)
+        migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_ws_validation")
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "   "},
+        ])
+        with pytest.raises(RuntimeError, match="invalid emails"):
+            _run(migrate_module._migrate(db, dry_run=False))
+        # Verify email not rewritten
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["email"] == "   "
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+        monkeypatch.undo()
