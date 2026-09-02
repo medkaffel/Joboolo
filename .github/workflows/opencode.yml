@@ -18,7 +18,7 @@ jobs:
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MODEL: opencode/big-pickle
+      MODEL: opencode/nemotron-3-ultra-free
 
     steps:
       - name: Checkout main
