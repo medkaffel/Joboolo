@@ -214,26 +214,66 @@ async def _credit_if_paid(db, session_id: str):
                 if credited_result.modified_count == 1:
                     await _send_recruiter_receipt(db, record)
         else:
-            # posting_pack / partner_topup : logique existante inchangée (hors P0-005).
-            res = await db.payment_transactions.update_one(
+            # posting_pack / partner_topup : effet autoritatif atomique D'ABORD sur partner_profiles.
+            partner_id = record["partner_id"]
+            session_id = record["session_id"]
+            kind = record["kind"]
+
+            if kind == "posting_pack":
+                inc_field = "postings_remaining"
+                inc_value = int(record["postings"])
+                update_doc = {"$inc": {inc_field: inc_value}, "$addToSet": {"credited_sessions": session_id}}
+            else:  # partner_topup
+                inc_field = "balance"
+                inc_value = float(record["amount"])
+                update_doc = {"$inc": {inc_field: inc_value}, "$addToSet": {"credited_sessions": session_id}, "$set": {"low_balance_notified": False}}
+
+            # Atomic authoritative effect: filter excludes already-credited session.
+            credit_result = await db.partner_profiles.update_one(
+                {"user_id": partner_id, "credited_sessions": {"$ne": session_id}},
+                update_doc,
+            )
+
+            # If modified_count == 0, verify by reading: session already present => effect already applied.
+            effect_confirmed = False
+            if credit_result.modified_count == 1:
+                effect_confirmed = True
+            elif await _partner_credit_present(db, partner_id, session_id):
+                effect_confirmed = True
+
+            if not effect_confirmed:
+                # Partner profile absent or effect not confirmed: leave credited != True, raise retryable error.
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Effet de crédit non confirmé (profil partenaire absent ou écriture échouée). Retry ultérieur requis.",
+                )
+
+            # Authoritative effect confirmed: now mark payment_transactions.credited=True (secondary marker).
+            credited_result = await db.payment_transactions.update_one(
                 {"session_id": session_id, "credited": {"$ne": True}},
                 {"$set": {"credited": True, "credited_at": datetime.now(timezone.utc)}},
             )
-            if res.modified_count == 1:
-                if record.get("kind") == "posting_pack" and record.get("postings"):
-                    await db.partner_profiles.update_one(
-                        {"user_id": record["partner_id"]},
-                        {"$inc": {"postings_remaining": int(record["postings"])}},
-                    )
-                    await _send_receipt(db, record)
-                else:
-                    await db.partner_profiles.update_one(
-                        {"user_id": record["partner_id"]},
-                        {"$inc": {"balance": float(record["amount"])}, "$set": {"low_balance_notified": False}},
-                    )
-                    await _send_receipt(db, record)
+
+            # Receipt only on effective transition to credited=True.
+            if credited_result.modified_count == 1:
+                await _send_receipt(db, record)
+
+        # Re-fetch record for both recruiter_pack and partner_topup/posting_pack
+        # to return updated credited status.
         record = await db.payment_transactions.find_one({"session_id": session_id})
     return record
+
+
+async def _partner_credit_present(db, partner_id: str, session_id: str) -> bool:
+    """Confirme que le session_id est déjà présent dans credited_sessions du partner_profiles
+    (cas retry après crash entre l'effet autoritatif et le marquage credited=True)."""
+    if not partner_id:
+        return False
+    profile = await db.partner_profiles.find_one(
+        {"user_id": partner_id, "credited_sessions": session_id},
+        {"_id": 1},
+    )
+    return profile is not None
 
 
 async def _recruiter_grant_present(db, user_id, session_id) -> bool:
