@@ -55,33 +55,61 @@ def _parse_args(argv):
 async def _ensure_admin(email: str, password: str) -> str:
     from database import get_database
     from auth import get_password_hash
-    from email_utils import canonical_email
+    from email_utils import canonical_email, lookup_user_by_email, \
+        LookupAggregationError, LookupCollisionError
+    from pymongo.errors import DuplicateKeyError
 
     db = await get_database()
-    # P0-009: canonicalize email
     email = canonical_email(email)
-    existing = await db.users.find_one({"email": email})
+
+    # P0-009: transitionnal lookup — fail-closed on ambiguity
+    try:
+        existing = await lookup_user_by_email(email)
+    except (LookupAggregationError, LookupCollisionError) as exc:
+        sys.stderr.write(
+            f"Erreur: lookup transitionnel a échoué — {exc}\n"
+            "Aucune création effectuée.\n"
+        )
+        return "error"
     if existing:
         return "exists"
 
     hashed = get_password_hash(password)
     now = __import__("datetime").datetime.utcnow()
-    await db.users.insert_one({
-        "email": email,
-        "first_name": "Admin",
-        "last_name": "Principal",
-        "user_type": "admin",
-        "hashed_password": hashed,
-        "phone": None,
-        "location": None,
-        "bio": None,
-        "skills": [],
-        "experience_years": None,
-        "is_active": True,
-        "is_verified": True,
-        "created_at": now,
-        "updated_at": now,
-    })
+    try:
+        await db.users.insert_one({
+            "email": email,
+            "first_name": "Admin",
+            "last_name": "Principal",
+            "user_type": "admin",
+            "hashed_password": hashed,
+            "phone": None,
+            "location": None,
+            "bio": None,
+            "skills": [],
+            "experience_years": None,
+            "is_active": True,
+            "is_verified": True,
+            "created_at": now,
+            "updated_at": now,
+        })
+    except DuplicateKeyError:
+        # P0-009: race — relookup transitionnel
+        try:
+            existing = await lookup_user_by_email(email)
+        except (LookupAggregationError, LookupCollisionError) as exc:
+            sys.stderr.write(
+                f"Erreur: relookup après DuplicateKey a échoué — {exc}\n"
+                "Aucune création effectuée.\n"
+            )
+            return "error"
+        if existing:
+            return "exists"
+        sys.stderr.write(
+            "Erreur: DuplicateKeyError sans compte existant trouvable — "
+            "état incohérent, aucune création effectuée.\n"
+        )
+        return "error"
     return "created"
 
 
@@ -117,6 +145,8 @@ def main(argv=None):
     if result == "exists":
         sys.stdout.write("Un administrateur existe déjà pour cet email. Aucune modification.\n")
         return 0
+    if result == "error":
+        return 1
     sys.stdout.write("Administrateur initial créé (mot de passe jamais affiché ni stocké en clair).\n")
     return 0
 

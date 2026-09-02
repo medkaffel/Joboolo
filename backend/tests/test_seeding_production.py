@@ -200,6 +200,13 @@ class TestCreateAdminScript:
         monkeypatch.setitem(sys.modules, "database", db_mod)
         monkeypatch.setitem(sys.modules, "auth", auth_mod)
 
+        # P0-009: transitionnal lookup finds nothing → email is free.
+        import email_utils as _eu
+        async def _lookup_none(email):
+            return None
+
+        monkeypatch.setattr(_eu, "lookup_user_by_email", _lookup_none)
+
         import asyncio
         result = asyncio.run(admin._ensure_admin("admin@exemple.fr", "a-forte-password"))
         assert result == "created"
@@ -237,6 +244,13 @@ class TestCreateAdminScript:
         auth_mod.get_password_hash = _get_password_hash
         monkeypatch.setitem(sys.modules, "database", db_mod)
         monkeypatch.setitem(sys.modules, "auth", auth_mod)
+
+        # P0-009: transitionnal lookup finds an existing account → idempotent.
+        import email_utils as _eu
+        async def _lookup_exists(email):
+            return Existing()
+
+        monkeypatch.setattr(_eu, "lookup_user_by_email", _lookup_exists)
 
         import asyncio
         result = asyncio.run(admin._ensure_admin("admin@exemple.fr", "whatever"))

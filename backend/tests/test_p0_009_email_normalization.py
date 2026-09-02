@@ -2373,3 +2373,244 @@ class TestMigrationCanonicalValidation:
         marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
         assert marker is None
         monkeypatch.undo()
+
+
+# --------------------------------------------------------------------------- #
+# 30. P0-009 BUILD CORRECTION: create_admin.py transitionnal lookup           #
+# --------------------------------------------------------------------------- #
+class TestCreateAdminTransitionnalLookup:
+    """P0-009: create_admin._ensure_admin must use lookup_user_by_email (fail-closed)
+    BEFORE creation, so a legacy ' Admin@Example.COM ' prevents creation of
+    'admin@example.com'. On LookupAggregationError/LookupCollisionError it must
+    not create anything and return a deterministic operator error. On
+    DuplicateKeyError, relookup transitionnally: exactly 1 account => idempotent
+    'exists'; otherwise fail closed. No broad except Exception."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        self.admin = _load(
+            monkeypatch, "scripts/create_admin.py", "p009_create_admin")
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        # Stub the real `database` module so create_admin's `from database
+        # import get_database` returns our fake DB.
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        def _get_password_hash(p):
+            return "HASH(" + p + ")"
+
+        auth = types.ModuleType("auth")
+        auth.get_password_hash = _get_password_hash
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+    def _seed_legacy_admin(self):
+        """Seed a legacy non-canonical admin account."""
+        self.db.users._docs.append({
+            "_id": "legacy_admin", "email": " Admin@Example.COM ",
+            "user_type": "admin", "hashed_password": "h", "is_active": True,
+            "first_name": "Legacy", "last_name": "Admin",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": True,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+    def test_legacy_admin_blocks_creation_returns_exists(self):
+        """Legacy ' Admin@Example.COM ' must prevent creation of 'admin@example.com'."""
+        self._seed_legacy_admin()
+        result = _run(self.admin._ensure_admin("admin@example.com", "secret"))
+        assert result == "exists"
+        assert len(self.db.users._docs) == 1  # no new account
+
+    def test_aggregation_error_returns_error_no_creation(self, monkeypatch):
+        """LookupAggregationError => return 'error', create nothing."""
+        def _broken_aggregate(pipeline):
+            raise RuntimeError("MongoDB aggregation unavailable")
+        self.db.users.aggregate = _broken_aggregate
+
+        result = _run(self.admin._ensure_admin("admin@example.com", "secret"))
+        assert result == "error"
+        assert len(self.db.users._docs) == 0
+
+    def test_collision_error_returns_error_no_creation(self):
+        """LookupCollisionError => return 'error', create nothing."""
+        self._seed_legacy_admin()
+        # Second legacy with same canonical email → collision
+        self.db.users._docs.append({
+            "_id": "legacy_admin2", "email": "  ADMIN@EXAMPLE.COM  ",
+            "user_type": "admin", "hashed_password": "h2", "is_active": True,
+            "first_name": "L2", "last_name": "A2",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": True,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+        result = _run(self.admin._ensure_admin("admin@example.com", "secret"))
+        assert result == "error"
+        assert len(self.db.users._docs) == 2  # nothing created
+
+    def test_duplicate_key_relookup_existing_returns_exists(self):
+        """DuplicateKeyError + relookup finds exactly 1 account => idempotent 'exists'."""
+        # Simulate a race: no pre-existing account at prelookup, then insert collides.
+        from pymongo.errors import DuplicateKeyError
+        original_insert = self.db.users.insert_one
+
+        async def _dk_insert(doc, **kwargs):
+            raise DuplicateKeyError("duplicate key on users collection")
+
+        self.db.users.insert_one = _dk_insert
+        # Seed the account the relookup will find
+        self._seed_legacy_admin()
+
+        result = _run(self.admin._ensure_admin("admin@example.com", "secret"))
+        assert result == "exists"
+        assert len(self.db.users._docs) == 1
+
+    def test_duplicate_key_relookup_collision_returns_error(self):
+        """DuplicateKeyError + relookup finds >1 => fail closed 'error'."""
+        from pymongo.errors import DuplicateKeyError
+        self._seed_legacy_admin()
+        self.db.users._docs.append({
+            "_id": "legacy_admin2", "email": "  ADMIN@EXAMPLE.COM  ",
+            "user_type": "admin", "hashed_password": "h2", "is_active": True,
+            "first_name": "L2", "last_name": "A2",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": True,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+        async def _dk_insert(doc, **kwargs):
+            raise DuplicateKeyError("duplicate key")
+
+        self.db.users.insert_one = _dk_insert
+
+        result = _run(self.admin._ensure_admin("admin@example.com", "secret"))
+        assert result == "error"
+        assert len(self.db.users._docs) == 2
+
+    def test_duplicate_key_relookup_none_returns_error(self):
+        """DuplicateKeyError + relookup finds 0 => fail closed 'error'."""
+        from pymongo.errors import DuplicateKeyError
+
+        async def _dk_insert(doc, **kwargs):
+            raise DuplicateKeyError("duplicate key")
+
+        self.db.users.insert_one = _dk_insert
+
+        result = _run(self.admin._ensure_admin("admin@example.com", "secret"))
+        assert result == "error"
+        assert len(self.db.users._docs) == 0
+
+    def test_source_uses_lookup_before_insert_and_no_broad_except(self):
+        """create_admin must use lookup_user_by_email, no find_one, no broad except."""
+        source = open(BACKEND_DIR / "scripts" / "create_admin.py").read()
+        assert "lookup_user_by_email(email)" in source
+        assert 'db.users.find_one({"email": email})' not in source
+        # No broad except Exception anywhere
+        assert "except Exception:" not in source
+        assert "except Exception as" not in source
+
+
+# --------------------------------------------------------------------------- #
+# 31. P0-009 BUILD CORRECTION: auth.get_current_user ValueError => 401         #
+# --------------------------------------------------------------------------- #
+_JWT_SIG_ERROR = object()
+
+
+class TestGetCurrentUserInvalidSub:
+    """P0-009: get_current_user must not HTTP 500 on a signed JWT whose 'sub'
+    is empty/non-string/whitespace. canonical_email raises ValueError, which the
+    try only caught JWTError for — an invalid JWT must give the same controlled
+    401 credentials_exception, never a 500."""
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        # Import real auth module (its deps fastapi/jose/passlib/pydantic are
+        # installed). Provide a fake DB + fake JWT decode to stay deterministic.
+        import auth as _auth_mod
+        self.auth = _auth_mod
+
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        # Secure fixed secret key
+        monkeypatch.setattr(_auth_mod, "get_secret_key", lambda: "test-secret-key")
+
+        # Default: any user lookup returns None (no DB dependency)
+        monkeypatch.setattr(_auth_mod, "get_user_by_email", None)
+
+        self.decode_outcome = {"payload": {"sub": None}}
+
+        def _fake_decode(token, key, algorithms=None):
+            outcome = self.decode_outcome["payload"]
+            if outcome is _JWT_SIG_ERROR:
+                raise _auth_mod.JWTError("bad signature")
+            return outcome
+
+        monkeypatch.setattr(_auth_mod.jwt, "decode", _fake_decode)
+
+    def _creds(self):
+        return types.SimpleNamespace(credentials="some.token.value")
+
+    def test_blank_sub_raises_401(self):
+        import fastapi
+        for bad_sub in [None, "", "   ", 12345]:
+            self.decode_outcome["payload"] = {"sub": bad_sub}
+            with pytest.raises(fastapi.HTTPException) as exc:
+                _run(self.auth.get_current_user(self._creds()))
+            assert exc.value.status_code == 401
+            assert exc.value.detail == "Could not validate credentials"
+
+    def test_invalid_signature_raises_401(self):
+        import fastapi
+        self.decode_outcome["payload"] = _JWT_SIG_ERROR
+        with pytest.raises(fastapi.HTTPException) as exc:
+            _run(self.auth.get_current_user(self._creds()))
+        assert exc.value.status_code == 401
+
+    def test_noncanonical_jwt_resolves_legacy_account(self):
+        """Old JWT with non-canonical sub resolves the legacy account via lookup.
+        get_current_user canonicalizes the sub BEFORE lookup, so a legacy
+        ' Foo@Example.COM ' account is still found."""
+        import auth as _auth_mod
+        from models import User
+
+        captured = {}
+
+        async def _get_by_email(email):
+            captured["email"] = email
+            return User(
+                id="legacy_u", email=" Foo@Example.COM ",
+                first_name="Foo", last_name="Bar", user_type="candidate",
+                phone=None, location=None, bio=None, skills=[],
+                experience_years=None, is_active=True, is_verified=False,
+                hashed_password="h", created_at=datetime.utcnow(),
+            )
+
+        _auth_mod.get_user_by_email = _get_by_email
+        self.decode_outcome["payload"] = {"sub": " Foo@Example.COM "}
+
+        result = _run(self.auth.get_current_user(self._creds()))
+        # canonical_email applied before lookup → email canonicalized
+        assert captured["email"] == "foo@example.com"
+        # The legacy account is resolved (result not None / not 401) and its
+        # canonical email matches (whitespace/case of the stored value removed).
+        assert result is not None
+        assert str(result.email).strip().lower() == "foo@example.com"
+
+    def test_source_catches_value_error(self):
+        source = open(BACKEND_DIR / "auth.py").read()
+        assert "(JWTError, ValueError)" in source

@@ -92,7 +92,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         # P0-009: normalize JWT sub to canonical form before lookup
         email = canonical_email(email)
         token_data = TokenData(email=email)
-    except JWTError:
+    except (JWTError, ValueError):
         raise credentials_exception
     
     user = await get_user_by_email(email=token_data.email)
