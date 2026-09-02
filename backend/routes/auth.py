@@ -7,9 +7,14 @@ from auth import (
     get_password_hash, authenticate_user, create_access_token,
     get_current_active_user
 )
+from email_utils import (
+    canonical_email, lookup_user_doc_by_email,
+    LookupAggregationError, LookupCollisionError,
+)
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import httpx
+import pymongo.errors
 
 EMERGENT_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
@@ -60,9 +65,19 @@ async def register(user_data: UserCreate):
     """Register a new user"""
     db = await get_database()
     
-    # Check if user already exists
-    existing_user = await db.users.find_one({"email": user_data.email})
-    if existing_user:
+    # P0-009: canonicalize email
+    email = canonical_email(user_data.email)
+    
+    # P0-009: transitionnal lookup — catches legacy non-canonical duplicates
+    try:
+        existing = await lookup_user_doc_by_email(email)
+    except (LookupAggregationError, LookupCollisionError) as exc:
+        # Fail closed: cannot determine email uniqueness → refuse creation
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+    if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
@@ -71,10 +86,11 @@ async def register(user_data: UserCreate):
     # Hash password
     hashed_password = get_password_hash(user_data.password)
     
-    # Create user document
+    # Create user document with canonical email
     user_doc = {
-        "_id": f"user_{user_data.email}_{hash(user_data.email)}",
-        **user_data.dict(exclude={"password"}),
+        "_id": f"user_{email}_{hash(email)}",
+        **user_data.dict(exclude={"password", "email"}),
+        "email": email,
         "hashed_password": hashed_password,
         "is_active": True,
         "is_verified": False,
@@ -83,12 +99,32 @@ async def register(user_data: UserCreate):
     }
     
     # Insert user
-    await db.users.insert_one(user_doc)
+    try:
+        await db.users.insert_one(user_doc)
+    except pymongo.errors.DuplicateKeyError:
+        # P0-009: DuplicateKeyError race — re-lookup transitionnally
+        try:
+            existing = await lookup_user_doc_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            # Fail closed: cannot verify uniqueness after race
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered"
+        )
     
-    # Create access token
+    # Create access token with canonical sub
     access_token_expires = timedelta(minutes=30 * 24)  # 30 days
     access_token = create_access_token(
-        data={"sub": user_data.email},
+        data={"sub": email},
         expires_delta=access_token_expires
     )
     
@@ -120,31 +156,51 @@ async def register_partner(data: PartnerRegisterRequest):
     import os
     db = await get_database()
 
-    email = data.email.strip().lower()
-    if await db.users.find_one({"email": email}):
+    # P0-009: canonicalize email
+    email = canonical_email(data.email)
+    try:
+        existing = await lookup_user_doc_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+    if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email déjà utilisé")
 
     now = datetime.utcnow()
     user_id = f"partner_{_uuid.uuid4()}"
-    await db.users.insert_one({
-        "_id": user_id,
-        "email": email,
-        "first_name": data.first_name,
-        "last_name": data.last_name,
-        "user_type": "partner",
-        "hashed_password": get_password_hash(data.password),
-        "phone": None, "location": None, "bio": None, "skills": [], "experience_years": None,
-        "is_active": False,          # en attente de validation admin
-        "is_verified": False,
-        "pending_validation": True,
-        "signup_source": data.signup_source,
-        "signup_referrer": data.signup_referrer,
-        "signup_landing": data.signup_landing,
-        "utm_source": data.utm_source,
-        "utm_medium": data.utm_medium,
-        "utm_campaign": data.utm_campaign,
-        "created_at": now, "updated_at": now,
-    })
+    try:
+        await db.users.insert_one({
+            "_id": user_id,
+            "email": email,
+            "first_name": data.first_name,
+            "last_name": data.last_name,
+            "user_type": "partner",
+            "hashed_password": get_password_hash(data.password),
+            "phone": None, "location": None, "bio": None, "skills": [], "experience_years": None,
+            "is_active": False,          # en attente de validation admin
+            "is_verified": False,
+            "pending_validation": True,
+            "signup_source": data.signup_source,
+            "signup_referrer": data.signup_referrer,
+            "signup_landing": data.signup_landing,
+            "utm_source": data.utm_source,
+            "utm_medium": data.utm_medium,
+            "utm_campaign": data.utm_campaign,
+            "created_at": now, "updated_at": now,
+        })
+    except pymongo.errors.DuplicateKeyError:
+        try:
+            existing = await lookup_user_doc_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
+        if existing:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email déjà utilisé")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email déjà utilisé")
     await db.partner_profiles.insert_one({
         "_id": str(_uuid.uuid4()),
         "user_id": user_id,
@@ -182,7 +238,15 @@ async def register_partner(data: PartnerRegisterRequest):
 @router.post("/login", response_model=LoginResponse)
 async def login(login_data: LoginRequest):
     """Login user"""
-    user = await authenticate_user(login_data.email, login_data.password)
+    try:
+        user = await authenticate_user(login_data.email, login_data.password)
+    except (LookupAggregationError, LookupCollisionError):
+        # P0-009: LookupAggregationError / LookupCollisionError from
+        # authenticate_user → fail closed, do not silently select/create account
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -221,10 +285,10 @@ async def login(login_data: LoginRequest):
                 ),
             )
     
-    # Create access token
+    # Create access token with canonical sub
     access_token_expires = timedelta(minutes=30 * 24)  # 30 days
     access_token = create_access_token(
-        data={"sub": user.email},
+        data={"sub": canonical_email(user.email)},
         expires_delta=access_token_expires
     )
     
@@ -265,23 +329,64 @@ async def google_session(payload: GoogleSessionRequest):
         raise HTTPException(status_code=401, detail="Session Google invalide")
 
     data = resp.json()
-    email = data.get("email")
+    email_raw = data.get("email")
     name = data.get("name") or ""
-    if not email:
+    if not email_raw:
         raise HTTPException(status_code=401, detail="Email Google introuvable")
 
-    db = await get_database()
-    user_doc = await db.users.find_one({"email": email})
+    # P0-009: canonicalize email
+    email = canonical_email(email_raw)
 
-    if not user_doc:
-        parts = name.split(" ", 1)
-        first_name = parts[0] if parts and parts[0] else email.split("@")[0]
-        last_name = parts[1] if len(parts) > 1 else ""
+    db = await get_database()
+    # P0-009: transitionnal lookup — reuse legacy account if found
+    try:
+        existing_doc = await lookup_user_doc_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+
+    parts = name.split(" ", 1)
+    g_first = parts[0] if parts and parts[0] else email.split("@")[0]
+    g_last = parts[1] if len(parts) > 1 else ""
+
+    if existing_doc:
+        # P0-009: strictly REUSE the same _id. Do not create or merge a
+        # second account. Only complete identity fields (first_name/last_name)
+        # if they are missing and a valid response requires them.
+        user_id = existing_doc["_id"]
+        first_name = existing_doc.get("first_name") or g_first
+        last_name = existing_doc.get("last_name") or g_last
+        user_doc = {
+            "_id": user_id,
+            "email": existing_doc.get("email") or email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "user_type": existing_doc.get("user_type", "candidate"),
+            "phone": existing_doc.get("phone"),
+            "location": existing_doc.get("location"),
+            "bio": existing_doc.get("bio"),
+            "skills": existing_doc.get("skills", []),
+            "experience_years": existing_doc.get("experience_years"),
+            "hashed_password": existing_doc.get("hashed_password") or "",
+            "is_active": existing_doc.get("is_active", True),
+            "is_verified": existing_doc.get("is_verified", False),
+            "created_at": existing_doc.get("created_at"),
+        }
+        # Complete identity fields in-place on the SAME _id (no new account).
+        if (existing_doc.get("first_name") is None or existing_doc.get("last_name") is None):
+            await db.users.update_one(
+                {"_id": user_id},
+                {"$set": {"first_name": first_name, "last_name": last_name,
+                          "updated_at": datetime.utcnow()}},
+            )
+    else:
         user_doc = {
             "_id": f"user_{email}_{hash(email)}",
             "email": email,
-            "first_name": first_name,
-            "last_name": last_name,
+            "first_name": g_first,
+            "last_name": g_last,
             "user_type": "candidate",
             "phone": None,
             "location": None,
@@ -295,10 +400,48 @@ async def google_session(payload: GoogleSessionRequest):
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
-        await db.users.insert_one(user_doc)
+        try:
+            await db.users.insert_one(user_doc)
+        except pymongo.errors.DuplicateKeyError:
+            # P0-009: DuplicateKeyError race — re-lookup
+            try:
+                existing = await lookup_user_doc_by_email(email)
+            except (LookupAggregationError, LookupCollisionError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Email lookup temporarily unavailable, please retry"
+                )
+            if existing:
+                user_id = existing["_id"]
+                e_first = existing.get("first_name") or g_first
+                e_last = existing.get("last_name") or g_last
+                user_doc = {
+                    "_id": user_id,
+                    "email": existing.get("email") or email,
+                    "first_name": e_first,
+                    "last_name": e_last,
+                    "user_type": existing.get("user_type", "candidate"),
+                    "phone": existing.get("phone"),
+                    "location": existing.get("location"),
+                    "bio": existing.get("bio"),
+                    "skills": existing.get("skills", []),
+                    "experience_years": existing.get("experience_years"),
+                    "hashed_password": existing.get("hashed_password") or "",
+                    "is_active": existing.get("is_active", True),
+                    "is_verified": existing.get("is_verified", False),
+                    "created_at": existing.get("created_at"),
+                }
+                if (existing.get("first_name") is None or existing.get("last_name") is None):
+                    await db.users.update_one(
+                        {"_id": user_id},
+                        {"$set": {"first_name": e_first, "last_name": e_last,
+                                  "updated_at": datetime.utcnow()}},
+                    )
+            else:
+                raise HTTPException(status_code=409, detail="Collision d'email lors de la création du compte")
 
     access_token = create_access_token(
-        data={"sub": email},
+        data={"sub": canonical_email(email)},
         expires_delta=timedelta(minutes=30 * 24 * 60),
     )
     return LoginResponse(user=_build_user_response(user_doc), token=Token(access_token=access_token))

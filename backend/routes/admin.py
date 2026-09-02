@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, status
 from typing import List, Optional
 from datetime import datetime
 import uuid
@@ -8,9 +8,11 @@ from pydantic import BaseModel
 
 from database import get_database
 from auth import require_admin, get_password_hash, get_user_by_email
+from email_utils import canonical_email, lookup_user_doc_by_email, LookupAggregationError, LookupCollisionError
 from models import (
     User, AdminUserUpdate, PartnerCreate, PartnerConfigUpdate, PartnerBillingMode
 )
+import pymongo.errors
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -182,14 +184,23 @@ async def validate_partner(user_id: str, admin: User = Depends(require_admin)):
 @router.post("/partners")
 async def create_partner(data: PartnerCreate, admin: User = Depends(require_admin)):
     db = await get_database()
-    if await get_user_by_email(data.email):
+    # P0-009: canonicalize email
+    email = canonical_email(data.email)
+    try:
+        existing = await lookup_user_doc_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+    if existing:
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
 
     user_id = f"partner_{uuid.uuid4()}"
     now = datetime.utcnow()
     user_doc = {
         "_id": user_id,
-        "email": data.email,
+        "email": email,
         "first_name": data.first_name,
         "last_name": data.last_name,
         "user_type": "partner",
@@ -198,7 +209,19 @@ async def create_partner(data: PartnerCreate, admin: User = Depends(require_admi
         "is_active": True, "is_verified": True,
         "created_at": now, "updated_at": now,
     }
-    await db.users.insert_one(user_doc)
+    try:
+        await db.users.insert_one(user_doc)
+    except pymongo.errors.DuplicateKeyError:
+        try:
+            existing = await lookup_user_doc_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
+        if existing:
+            raise HTTPException(status_code=400, detail="Email déjà utilisé")
+        raise HTTPException(status_code=409, detail="Email déjà utilisé")
 
     profile = {
         "_id": str(uuid.uuid4()),
@@ -331,15 +354,35 @@ async def create_xml_feed(data: XmlFeedCreate, admin: User = Depends(require_adm
         # Create a login-less partner
         if not data.new_partner_company:
             raise HTTPException(status_code=400, detail="Nom du partenaire requis")
-        email = (data.new_partner_email or f"feed-{uuid.uuid4().hex[:8]}@partenaire.joboolo").lower()
-        if await get_user_by_email(email):
+        # P0-009: canonicalize email
+        email = canonical_email(data.new_partner_email or f"feed-{uuid.uuid4().hex[:8]}@partenaire.joboolo")
+        try:
+            existing = await lookup_user_doc_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
+        if existing:
             raise HTTPException(status_code=400, detail="Email déjà utilisé")
         partner_id = f"partner_{uuid.uuid4()}"
-        await db.users.insert_one({
-            "_id": partner_id, "email": email, "first_name": data.new_partner_company, "last_name": None,
-            "user_type": "partner", "hashed_password": None,  # login-less
-            "is_active": True, "is_verified": True, "created_at": now, "updated_at": now,
-        })
+        try:
+            await db.users.insert_one({
+                "_id": partner_id, "email": email, "first_name": data.new_partner_company, "last_name": None,
+                "user_type": "partner", "hashed_password": None,  # login-less
+                "is_active": True, "is_verified": True, "created_at": now, "updated_at": now,
+            })
+        except pymongo.errors.DuplicateKeyError:
+            try:
+                existing = await lookup_user_doc_by_email(email)
+            except (LookupAggregationError, LookupCollisionError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Email lookup temporarily unavailable, please retry"
+                )
+            if existing:
+                raise HTTPException(status_code=400, detail="Email déjà utilisé")
+            raise HTTPException(status_code=409, detail="Email déjà utilisé")
         await db.partner_profiles.insert_one({
             "_id": str(uuid.uuid4()), "user_id": partner_id, "company_name": data.new_partner_company,
             "billing_mode": data.billing_mode, "default_cpc": data.cpc, "posting_price": data.pack_price,

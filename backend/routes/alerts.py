@@ -1,11 +1,13 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
 from typing import List
 from models import (
     JobAlert, JobAlertCreate, JobAlertUpdate, JobAlertResponse, User
 )
 from database import get_database
 from auth import get_current_active_user
+from email_utils import canonical_email, lookup_user_doc_by_email, LookupAggregationError, LookupCollisionError
 from datetime import datetime
+import pymongo.errors
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -29,27 +31,53 @@ async def subscribe_alert(data: AlertSubscribe):
     """Public: save a search as an alert by email. Creates a lightweight candidate
     account if the email is unknown (same process as an authenticated alert)."""
     db = await get_database()
-    email = data.email.lower().strip()
+    # P0-009: canonicalize email
+    email = canonical_email(data.email)
 
-    user = await db.users.find_one({"email": email})
-    if not user:
-        user_id = f"user_{datetime.utcnow().timestamp()}"
-        await db.users.insert_one({
-            "_id": user_id,
-            "email": email,
-            "hashed_password": None,
-            "first_name": None,
-            "last_name": None,
-            "user_type": "candidate",
-            "is_active": True,
-            "profile_complete": False,
-            "location": data.location,
-            "signup_origin": data.origin or "alert_subscribe",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-        })
+    # P0-009: transitionnal lookup — reuse legacy account if found
+    try:
+        existing_user = await lookup_user_doc_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+
+    created_account = False
+    if existing_user:
+        user_id = existing_user["_id"]
     else:
-        user_id = user["_id"]
+        user_id = f"user_{datetime.utcnow().timestamp()}"
+        try:
+            await db.users.insert_one({
+                "_id": user_id,
+                "email": email,
+                "hashed_password": None,
+                "first_name": None,
+                "last_name": None,
+                "user_type": "candidate",
+                "is_active": True,
+                "profile_complete": False,
+                "location": data.location,
+                "signup_origin": data.origin or "alert_subscribe",
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            })
+            created_account = True
+        except pymongo.errors.DuplicateKeyError:
+            # P0-009: DuplicateKeyError race — re-lookup
+            try:
+                existing = await lookup_user_doc_by_email(email)
+            except (LookupAggregationError, LookupCollisionError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Email lookup temporarily unavailable, please retry"
+                )
+            if existing:
+                user_id = existing["_id"]
+                created_account = False
+            else:
+                raise HTTPException(status_code=409, detail="Collision d'email lors de la création du compte")
 
     name_parts = [p for p in [data.search, data.location] if p]
     alert_doc = {
@@ -72,7 +100,7 @@ async def subscribe_alert(data: AlertSubscribe):
         "updated_at": datetime.utcnow(),
     }
     await db.alerts.insert_one(alert_doc)
-    return {"success": True, "alert_id": alert_doc["_id"], "created_account": not bool(user)}
+    return {"success": True, "alert_id": alert_doc["_id"], "created_account": created_account}
 
 
 @router.get("/track/{alert_id}")
