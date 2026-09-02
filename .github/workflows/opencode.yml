@@ -88,6 +88,8 @@ jobs:
             echo
             echo "Read AGENTS.md, ARCHITECTURE.md, BUSINESS_RULES.md, TESTING.md and P0_AUDIT.md when present."
             echo
+            echo "ENGINEERING SAFETY: ne jamais modifier massivement le projet sans analyser les dépendances. Privilégier les changements minimaux. Après toute modification, quand les commandes existent et sont pertinentes, lancer les tests, le typecheck et le build applicables, puis corriger toute régression introduite avant de terminer. En mode PLAN, appliquer la même discipline à l'analyse et signaler les dépendances/risques sans modifier le projet."
+            echo
             echo "GitHub thread context (compact; inspect the repository for full source-of-truth details):"
             cat /tmp/thread.json
             echo
