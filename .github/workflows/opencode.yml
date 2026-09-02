@@ -27,6 +27,11 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Record checkout SHA
+        shell: bash
+        run: |
+          echo "START_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Install OpenCode
         shell: bash
         run: |
@@ -89,6 +94,8 @@ jobs:
             echo "Latest user command:"
             printf '%s\n' "$COMMENT_BODY"
             echo
+            echo "At the very end of your response, add exactly one machine-readable line: TESTS=<concise test summary, or NOT_RUN if no tests were executed>."
+            echo
             if [ "$MODE" = "plan" ]; then
               echo "MODE: PLAN ONLY. Read and analyze the repository. Do not modify files, commit, push, or create a PR. Return a concrete implementation plan and blockers."
             elif [ "$IS_PR" = "true" ]; then
@@ -114,6 +121,7 @@ jobs:
           git fetch origin "$BRANCH"
           git checkout -B "$BRANCH" "origin/$BRANCH"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          echo "START_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Create build branch
         if: steps.context.outputs.mode == 'build' && steps.context.outputs.is_pr != 'true'
@@ -122,6 +130,7 @@ jobs:
           BRANCH="opencode/issue-${{ steps.context.outputs.issue_number }}-${GITHUB_RUN_ID}"
           git checkout -b "$BRANCH"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          echo "START_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Run OpenCode plan
         if: steps.context.outputs.mode == 'plan'
@@ -195,3 +204,83 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --body-file /tmp/opencode-build-comment.txt
           fi
+
+      - name: Publish OpenCode completion receipt
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ISSUE="$(jq -r '.issue.number // empty' "$GITHUB_EVENT_PATH")"
+          COMMENT_BODY="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
+          IS_PR="$(jq -r 'if .issue.pull_request then "true" else "false" end' "$GITHUB_EVENT_PATH")"
+
+          if printf '%s' "$COMMENT_BODY" | grep -Eiq '^/(oc|opencode)[[:space:]]+build\b|\bBUILD\b'; then
+            MODE_VALUE="build"
+          else
+            MODE_VALUE="plan"
+          fi
+
+          STATUS_RAW="${{ job.status }}"
+          if [ "$STATUS_RAW" = "success" ]; then
+            STATUS_VALUE="SUCCESS"
+          else
+            STATUS_VALUE="FAIL"
+          fi
+
+          if [ -n "${BRANCH:-}" ]; then
+            BRANCH_VALUE="$BRANCH"
+          elif [ "$MODE_VALUE" = "plan" ]; then
+            BRANCH_VALUE="main"
+          elif [ "$IS_PR" != "true" ] && [ -n "$ISSUE" ]; then
+            BRANCH_VALUE="opencode/issue-${ISSUE}-${GITHUB_RUN_ID}"
+          else
+            BRANCH_VALUE="UNKNOWN"
+          fi
+
+          SHA_VALUE="$(git rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
+
+          FILES_CHANGED_VALUE="NONE"
+          if [ -n "${START_SHA:-}" ] && git rev-parse --verify "$START_SHA" >/dev/null 2>&1; then
+            {
+              git diff --name-only "$START_SHA" -- 2>/dev/null || true
+              git ls-files --others --exclude-standard 2>/dev/null || true
+            } | sort -u > /tmp/opencode-files-changed.txt
+            if [ -s /tmp/opencode-files-changed.txt ]; then
+              FILES_CHANGED_VALUE="$(paste -sd, /tmp/opencode-files-changed.txt | cut -c1-4000)"
+            fi
+          fi
+
+          TESTS_VALUE="NOT_REPORTED"
+          if [ -f /tmp/opencode-output.txt ]; then
+            EXACT_TESTS="$(grep -E '^TESTS=' /tmp/opencode-output.txt | tail -1 | sed 's/^TESTS=//' || true)"
+            if [ -n "$EXACT_TESTS" ]; then
+              TESTS_VALUE="$EXACT_TESTS"
+            else
+              HEURISTIC_TESTS="$(grep -Ei '[0-9]+.*(passed|failed|skipped|tests? pass|tests? fail)' /tmp/opencode-output.txt | tail -1 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-500 || true)"
+              if [ -n "$HEURISTIC_TESTS" ]; then
+                TESTS_VALUE="$HEURISTIC_TESTS"
+              fi
+            fi
+          fi
+
+          TASK_VALUE="$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq '.title' 2>/dev/null | sed -nE 's/.*(P0-[0-9]+).*/\1/p' | head -1 || true)"
+          if [ -z "$TASK_VALUE" ]; then
+            TASK_VALUE="UNKNOWN"
+          fi
+
+          cat > /tmp/opencode-receipt.txt <<EOF
+          OPENCODE_DONE
+          STATUS=$STATUS_VALUE
+          TASK=$TASK_VALUE
+          ISSUE=$ISSUE
+          BRANCH=$BRANCH_VALUE
+          SHA=$SHA_VALUE
+          TESTS=$TESTS_VALUE
+          FILES_CHANGED=$FILES_CHANGED_VALUE
+          MODE=$MODE_VALUE
+          RUN_ID=$GITHUB_RUN_ID
+          EOF
+
+          gh issue comment "$ISSUE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file /tmp/opencode-receipt.txt
