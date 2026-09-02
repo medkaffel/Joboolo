@@ -89,7 +89,7 @@ async def register(user_data: UserCreate):
     # Create user document with canonical email
     user_doc = {
         "_id": f"user_{email}_{hash(email)}",
-        **{k: v for k, v in user_data.dict().items() if k != "email"},
+        **user_data.dict(exclude={"password", "email"}),
         "email": email,
         "hashed_password": hashed_password,
         "is_active": True,

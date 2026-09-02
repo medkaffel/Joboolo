@@ -776,6 +776,40 @@ class TestRoutesCanonicalization:
             _run(scenario())
         assert exc.value.status_code == 400
 
+    def test_register_does_not_store_plain_password(self):
+        """Regression test: register must not store the plaintext password field.
+        
+        Before the fix, user_data.dict() only excluded 'email', causing the
+        plaintext 'password' to be persisted alongside 'hashed_password'.
+        This test ensures only 'hashed_password' exists in the stored document.
+        """
+        async def scenario():
+            user_data = _Model(
+                email="  Test@Example.COM  ",
+                password="MySecretPassword123",
+                first_name="Test",
+                last_name="User",
+                user_type="candidate",
+            )
+            result = await self.routes_auth.register(user_data)
+            return result
+
+        _run(scenario())
+        
+        # Find the inserted user document
+        u = _run(self.db.users.find_one({"_id": {"$regex": "user_"}}))
+        assert u is not None
+        
+        # Verify email is stored in canonical form
+        assert u["email"] == "test@example.com"
+        
+        # Verify hashed_password is present
+        assert "hashed_password" in u
+        assert u["hashed_password"] == "hashed_MySecretPassword123"  # mocked by auth.get_password_hash
+        
+        # CRITICAL: Verify plaintext password key is ABSENT
+        assert "password" not in u, "Plaintext password must not be stored in database"
+
     def test_login_canonicalizes_email(self):
         async def scenario():
             fake_user = _Model(
@@ -816,6 +850,8 @@ class TestRegressions:
     def test_routes_auth_source_uses_canonical_email(self):
         source = open(BACKEND_DIR / "routes" / "auth.py").read()
         assert "canonical_email" in source
+
+    
 
 
 # --------------------------------------------------------------------------- #
