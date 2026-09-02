@@ -21,7 +21,12 @@ Sûreté:
 - L'inventaire couvre TOUS les users via un curseur streaming (pas de
   troncation).
 - Le marker existant ne masque pas une base incohérente : un postverify
-  complet est effectué avant de retourner ``already_migrated``.
+  complet est effectué avant de retourner ``already_migrated``. Si le marker
+  est présent mais la base incohérente, la migration échoue explicitement
+  SANS supprimer le marker (dry-run comme apply : zéro mutation).
+- La source de vérité de canonicalisation est ``canonical_email()`` côté
+  Python pour CHAQUE user (inventaire et post-verify), via un curseur de
+  streaming ``find({})`` non tronqué.
 
 Usage:
     # Dry-run (défaut)
@@ -80,7 +85,12 @@ def _compute_canonical(email_value):
 
 
 async def _inventory_all_users(db):
-    """Inventory ALL users via streaming cursor. Returns:
+    """Inventory ALL users via a streaming cursor ``find({})`` (non-truncated).
+
+    Source of truth for canonicalisation is ``canonical_email()`` (Python) for
+    EACH user — never Mongo ``$trim/$toLower``.
+
+    Returns:
     - invalid_users: list of docs with non-string/absent/empty/whitespace emails
     - canonical_groups: dict of canonical_email -> list of {id, email} docs
     - total_users: total count
@@ -89,124 +99,53 @@ async def _inventory_all_users(db):
     canonical_groups = {}
     total_users = 0
 
-    pipeline = [
-        {
-            "$addFields": {
-                "_email_canonical": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$email"}, "string"]},
-                        "then": {
-                            "$cond": {
-                                "if": {"$eq": [{"$trim": {"input": "$email"}}, ""]},
-                                "then": None,
-                                "else": {"$toLower": {"$trim": {"input": "$email"}}},
-                            }
-                        },
-                        "else": None,
-                    }
-                }
-            }
-        },
-        {
-            "$group": {
-                "_id": "$_email_canonical",
-                "count": {"$sum": 1},
-                "ids": {"$push": "$_id"},
-                "emails": {"$push": "$email"},
-            }
-        },
-    ]
+    cursor = db.users.find({}, {"email": 1})
+    async for doc in cursor:
+        total_users += 1
+        uid = doc.get("_id")
+        email_val = doc.get("email")
 
-    cursor = db.users.aggregate(pipeline)
-    async for group in cursor:
-        canonical = group["_id"]
-        count = group["count"]
-        ids = group["ids"]
-        emails = group["emails"]
-        total_users += count
-
-        if canonical is None:
-            # All docs in this group have invalid emails
-            for uid, email_val in zip(ids, emails):
-                invalid_users.append({"_id": uid, "email": email_val})
+        if _is_invalid_email(email_val):
+            invalid_users.append({"_id": uid, "email": email_val})
             continue
 
-        if count > 1:
-            # Collision: multiple users share canonical email
-            if canonical not in canonical_groups:
-                canonical_groups[canonical] = []
-            for uid, email_val in zip(ids, emails):
-                canonical_groups[canonical].append({"_id": uid, "email": email_val})
-        else:
-            # Single user: track for potential update
-            if canonical not in canonical_groups:
-                canonical_groups[canonical] = []
-            for uid, email_val in zip(ids, emails):
-                canonical_groups[canonical].append({"_id": uid, "email": email_val})
+        canonical = canonical_email(email_val)
+        canonical_groups.setdefault(canonical, []).append({"_id": uid, "email": email_val})
 
     return invalid_users, canonical_groups, total_users
 
 
 async def _post_verify(db):
-    """Post-verify: re-run complete inventory and confirm everything is clean.
+    """Post-verify: re-run complete inventory using the SAME Python
+    ``canonical_email()`` logic and confirm everything is clean.
     Returns (ok, errors_list).
     """
     errors = []
+    seen = {}
 
-    pipeline = [
-        {
-            "$addFields": {
-                "_email_canonical": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$email"}, "string"]},
-                        "then": {
-                            "$cond": {
-                                "if": {"$eq": [{"$trim": {"input": "$email"}}, ""]},
-                                "then": None,
-                                "else": {"$toLower": {"$trim": {"input": "$email"}}},
-                            }
-                        },
-                        "else": None,
-                    }
-                }
-            }
-        },
-        {
-            "$group": {
-                "_id": "$_email_canonical",
-                "count": {"$sum": 1},
-                "ids": {"$push": "$_id"},
-                "emails": {"$push": "$email"},
-            }
-        },
-    ]
+    cursor = db.users.find({}, {"email": 1})
+    async for doc in cursor:
+        uid = doc.get("_id")
+        email_val = doc.get("email")
 
-    cursor = db.users.aggregate(pipeline)
-    async for group in cursor:
-        canonical = group["_id"]
-        count = group["count"]
-        ids = group["ids"]
-        emails = group["emails"]
-
-        if canonical is None:
-            for uid, email_val in zip(ids, emails):
-                errors.append(f"Invalid email on user {uid}: {email_val!r}")
+        if _is_invalid_email(email_val):
+            errors.append(f"Invalid email on user {uid}: {email_val!r}")
             continue
 
-        # Check for whitespace-only
-        for uid, email_val in zip(ids, emails):
-            if _is_invalid_email(email_val):
-                errors.append(f"Invalid email on user {uid}: {email_val!r}")
-                continue
-            # Check non-canonical (should be canonical after migration)
-            if email_val != canonical:
-                errors.append(f"Non-canonical email on user {uid}: {email_val!r} != {canonical!r}")
+        canonical = canonical_email(email_val)
 
-        # Check collisions
-        if count > 1:
+        # Check non-canonical (should be canonical after migration)
+        if email_val != canonical:
+            errors.append(f"Non-canonical email on user {uid}: {email_val!r} != {canonical!r}")
+
+        seen.setdefault(canonical, []).append(uid)
+
+    # Check collisions at the very end
+    for canonical, ids in seen.items():
+        if len(ids) > 1:
             errors.append(
                 f"Collision on canonical email {canonical!r}: "
-                f"{count} users ({ids})"
+                f"{len(ids)} users ({ids})"
             )
 
     return len(errors) == 0, errors
@@ -239,16 +178,19 @@ async def _migrate(db, *, dry_run: bool = True) -> dict:
             logger.info("Already migrated (marker present, postverify OK).")
             return report
         else:
-            # Marker present but base is inconsistent — FAIL
-            logger.error(
-                "MARKER PRESENT BUT POST-VERIFY FAILED: %d inconsistencies. "
-                "Removing marker and re-running.",
-                len(errors),
-            )
-            await db.migration_flags.delete_one({"_id": P0009_MARKER})
+            # Marker present but base is inconsistent — FAIL explicitly.
+            # NEVER delete the marker (dry-run as apply): the diagnosis must
+            # not mutate the database. The marker alone is not proof of a
+            # consistent base.
             for e in errors:
                 logger.error("  %s", e)
-            # Continue with migration (marker removed)
+            raise RuntimeError(
+                f"Marker '{P0009_MARKER}' present but post-verify failed with "
+                f"{len(errors)} inconsistency(ies). "
+                "The marker is NOT a proof of a consistent database. "
+                "Fix the base manually, then relaunch. No changes were made "
+                "and the marker was left untouched."
+            )
 
     # Phase 1: Full inventory of ALL users (streaming, no truncation)
     invalid_users, canonical_groups, total_users = await _inventory_all_users(db)

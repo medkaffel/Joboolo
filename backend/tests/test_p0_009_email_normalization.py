@@ -277,8 +277,14 @@ class _FakeCollection:
     async def count_documents(self, query):
         return sum(1 for d in self._docs if self._matches(d, query))
 
-    def find(self, query=None):
-        return _FindCursor([dict(d) for d in self._docs if not query or self._matches(d, query)])
+    def find(self, query=None, projection=None):
+        docs = [dict(d) for d in self._docs if not query or self._matches(d, query)]
+        if projection:
+            docs = [
+                {k: v for k, v in d.items() if k in projection or k == "_id"}
+                for d in docs
+            ]
+        return _FindCursor(docs)
 
     def aggregate(self, pipeline):
         """Minimal aggregation simulation for P0-009 tests."""
@@ -359,6 +365,7 @@ class _FakeCollection:
 class _FindCursor:
     def __init__(self, docs):
         self._docs = docs
+        self._index = 0
 
     def sort(self, spec):
         for key, direction in reversed(spec):
@@ -371,6 +378,17 @@ class _FindCursor:
 
     async def to_list(self, length):
         return self._docs[:length]
+
+    def __aiter__(self):
+        self._index = 0
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self._docs):
+            raise StopAsyncIteration
+        item = self._docs[self._index]
+        self._index += 1
+        return item
 
 
 class _AsyncIterator:
@@ -1787,9 +1805,9 @@ class TestMigrationStreamingCursor:
     """P0-009: migration must iterate ALL groups via streaming cursor,
     not truncate via to_list(length=...)."""
 
-    def test_aggregate_returns_async_iterator(self):
-        """_AggCursor supports async iteration (no to_list truncation)."""
-        cursor = _AggCursor([{"_id": "a", "count": 1}, {"_id": "b", "count": 2}])
+    def test_find_cursor_returns_async_iterator(self):
+        """_FindCursor supports async iteration (no to_list truncation)."""
+        cursor = _FindCursor([{"_id": "a"}, {"_id": "b"}])
 
         async def consume():
             results = []
@@ -1803,12 +1821,14 @@ class TestMigrationStreamingCursor:
         assert result[1]["_id"] == "b"
 
     def test_migration_uses_async_for_not_to_list(self):
-        """Migration source must NOT use to_list for the aggregate cursor."""
+        """Migration source must iterate via streaming cursor, NOT to_list."""
         source = open(BACKEND_DIR / "scripts" / "migrate_p0009_email_normalization.py").read()
-        # Should use "async for" on the aggregate cursor
-        assert "async for group in cursor:" in source
-        # Must NOT have to_list with a numeric limit on the aggregate call
-        assert "aggregate(pipeline).to_list" not in source
+        # Should use "async for ... in cursor:" on a find({}) cursor throughout
+        assert "async for doc in cursor:" in source
+        # Must NOT have to_list with a numeric limit on the streaming cursor
+        assert "cursor.to_list" not in source
+        # Inventory must stream find({}) — not a truncated aggregate
+        assert "db.users.find({}, {\"email\": 1})" in source
 
 
 # --------------------------------------------------------------------------- #
@@ -2157,13 +2177,41 @@ class TestMigrationPostVerifyFailsNoMarker:
         marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
         assert marker is None
 
+    def test_postverify_detects_late_collision_no_marker(self, monkeypatch):
+        """A collision that appears only AFTER the updates (concurrent insert)
+        must be detected at post-verify => error + no marker."""
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "  Foo@Example.COM "},
+        ])
+
+        # Simulate a concurrent insert that creates a canonical collision
+        # AFTER the CAS update of u1 succeeds.
+        original_update = db.users.update_one
+        inserted = {"once": False}
+
+        async def _late_collision_update(query, update, session=None):
+            result = await original_update(query, update, session)
+            if result.matched_count == 1 and not inserted["once"]:
+                inserted["once"] = True
+                # A new user is created concurrently with the same canonical email
+                db.users._docs.append({"_id": "u2", "email": "foo@example.com"})
+            return result
+
+        db.users.update_one = _late_collision_update
+
+        with pytest.raises(RuntimeError, match="Post-verify failed"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
 
 # --------------------------------------------------------------------------- #
 # 26. P0-009: marker present + inconsistent base => fail                       #
 # --------------------------------------------------------------------------- #
 class TestMigrationMarkerPresentInconsistentBase:
     """P0-009: if marker is present but base is inconsistent, migration must
-    fail (not silently return already_migrated)."""
+    fail explicitly (dry-run as apply) WITHOUT mutating the base — in
+    particular it must NEVER delete the marker."""
 
     @pytest.fixture(autouse=True)
     def _setup(self, monkeypatch):
@@ -2172,25 +2220,42 @@ class TestMigrationMarkerPresentInconsistentBase:
             monkeypatch, "scripts/migrate_p0009_email_normalization.py",
             "p0009_migrate_marker_inconsistent")
 
-    def test_marker_present_but_noncanonical_fails(self):
-        """Marker present + non-canonical email => migration runs (marker removed),
-        not returning already_migrated."""
+    def test_marker_present_noncanonical_dry_run_raises_marker_stays(self):
+        """Dry-run: marker present + non-canonical email => explicit exception,
+        marker still present, zero writes."""
         db = _FakeDB(
             users=[
                 {"_id": "u1", "email": "  Foo@Example.COM "},  # non-canonical
             ],
             migration_flags=[{"_id": "p0009_email_normalization", "applied_at": datetime.utcnow()}],
         )
-        # Should NOT return already_migrated — should migrate
-        report = _run(self.migrate_module._migrate(db, dry_run=False))
-        assert report["already_migrated"] is False
-        assert report["updated"] == 1
-        assert report["marker_set"] is True
+        with pytest.raises(RuntimeError, match="marker|Marker"):
+            _run(self.migrate_module._migrate(db, dry_run=True))
+        # Marker must STILL be present (dry-run = zero write)
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is not None
+        # Email must NOT have been rewritten
         u1 = _run(db.users.find_one({"_id": "u1"}))
-        assert u1["email"] == "foo@example.com"
+        assert u1["email"] == "  Foo@Example.COM "
 
-    def test_marker_present_but_collision_fails(self):
-        """Marker present + collision => error, not already_migrated."""
+    def test_marker_present_noncanonical_apply_raises_marker_stays(self):
+        """Apply: marker present + non-canonical email => explicit exception,
+        marker still present (diagnosis must never mutate the base)."""
+        db = _FakeDB(
+            users=[
+                {"_id": "u1", "email": "  Foo@Example.COM "},  # non-canonical
+            ],
+            migration_flags=[{"_id": "p0009_email_normalization", "applied_at": datetime.utcnow()}],
+        )
+        with pytest.raises(RuntimeError, match="marker|Marker"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is not None
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["email"] == "  Foo@Example.COM "
+
+    def test_marker_present_collision_apply_raises_marker_stays(self):
+        """Apply: marker present + collision => error, marker kept (not removed)."""
         db = _FakeDB(
             users=[
                 {"_id": "u1", "email": "foo@example.com"},
@@ -2198,10 +2263,10 @@ class TestMigrationMarkerPresentInconsistentBase:
             ],
             migration_flags=[{"_id": "p0009_email_normalization", "applied_at": datetime.utcnow()}],
         )
-        with pytest.raises(RuntimeError, match="collision"):
+        with pytest.raises(RuntimeError):
             _run(self.migrate_module._migrate(db, dry_run=False))
         marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
-        assert marker is None  # marker was removed before re-run
+        assert marker is not None  # marker must NOT have been deleted
 
 
 # --------------------------------------------------------------------------- #
