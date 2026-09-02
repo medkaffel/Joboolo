@@ -403,7 +403,10 @@ async def update_job(
             update_data["loc"] = None  # marker for $unset
     
     # Build mongo update with $set and conditional $unset for loc
-    mongo_update = {"$set": {k: v for k, v in update_data.items() if v is not None}}
+    # Always include updated_at for manual updates
+    set_data = {k: v for k, v in update_data.items() if v is not None}
+    set_data["updated_at"] = datetime.utcnow()
+    mongo_update = {"$set": set_data}
     if loc_changed and update_data.get("loc") is None:
         mongo_update["$unset"] = {"loc": ""}
     

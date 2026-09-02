@@ -200,19 +200,49 @@ class _Collection:
     def find(self, query):
         """Return a cursor-like object for testing."""
         class _Cursor:
-            def __init__(self, docs, match_fn):
+            def __init__(self, docs, match_fn, query):
                 self._docs = docs
                 self._match_fn = match_fn
+                self._query = query
+                self._sort_criteria = None
+                self._skip = 0
+                self._limit = None
+
+            def sort(self, sort_criteria):
+                self._sort_criteria = sort_criteria
+                return self
+
+            def skip(self, skip):
+                self._skip = skip
+                return self
+
+            def limit(self, limit):
+                self._limit = limit
+                return self
 
             async def to_list(self, length):
                 results = []
                 for doc_id, doc in self._docs.items():
-                    if self._match_fn(doc, query):
+                    if self._match_fn(doc, self._query):
                         results.append(dict(doc))
                         if len(results) >= length:
                             break
+                # Apply sort if specified
+                if self._sort_criteria:
+                    # Simple sort implementation for testing
+                    reverse = False
+                    if isinstance(self._sort_criteria, list) and self._sort_criteria:
+                        # sort_criteria is like [("created_at", -1)]
+                        key = self._sort_criteria[0][0]
+                        order = self._sort_criteria[0][1]
+                        reverse = (order == -1)
+                        results.sort(key=lambda x: x.get(key, ""), reverse=reverse)
+                if self._skip:
+                    results = results[self._skip:]
+                if self._limit:
+                    results = results[:self._limit]
                 return results
-        return _Cursor(self._docs, self._match)
+        return _Cursor(self._docs, self._match, query)
 
     async def update_one(self, query, update, session=None):
         async with self._lock:
@@ -391,7 +421,9 @@ def _install_import_stubs(monkeypatch):
     campaign_lifecycle = types.ModuleType("campaign_lifecycle")
     campaign_lifecycle.is_job_publicly_visible = lambda job, camp: job.get("is_active", True)
     campaign_lifecycle.get_job_campaign = lambda db, job: None
-    campaign_lifecycle.fetch_public_job_filter = lambda db: {"is_active": True}
+    async def _fetch_public_job_filter(db):
+        return {"is_active": True}
+    campaign_lifecycle.fetch_public_job_filter = _fetch_public_job_filter
     monkeypatch.setitem(sys.modules, "campaign_lifecycle", campaign_lifecycle)
 
     geo = types.ModuleType("geo_service")
@@ -726,11 +758,44 @@ def test_update_job_location_to_empty_string_unsets_loc(jobs_module):
     assert "loc" not in updated
 
 
+def test_update_job_refreshes_updated_at(jobs_module):
+    """Toute mise à jour manuelle rafraîchit `updated_at`."""
+    client = _FakeClient()
+    client.db.users.seed_user(premium_credits=0)
+    client.db.companies.seed_company(COMPANY_ID)
+    old_time = datetime(2026, 1, 1, 12, 0, 0)
+    client.db.jobs.seed_job("job_1", **{
+        "_id": "job_1", "employer_id": USER_ID, "location": "Paris",
+        "title": "Old", "loc": {"type": "Point", "coordinates": [2.3522, 48.8566]},
+        "is_active": True, "created_at": old_time, "updated_at": old_time
+    })
+    user = _wire(jobs_module, client)
+
+    async def tracking_geocode(loc):
+        return None
+    jobs_module.geocode_place = tracking_geocode
+
+    # Premier update
+    asyncio.run(jobs_module.update_job("job_1", _make_job_update(title="New Title 1"), user))
+    updated1 = client.db.jobs.get("job_1")
+    assert updated1["updated_at"] > old_time
+    first_update_time = updated1["updated_at"]
+
+    # Deuxième update
+    asyncio.run(jobs_module.update_job("job_1", _make_job_update(title="New Title 2"), user))
+    updated2 = client.db.jobs.get("job_1")
+    assert updated2["updated_at"] > first_update_time
+    assert updated2["updated_at"] > old_time
+
+
 # --------------------------------------------------------------------------- #
 # Tests — Rayon ($geoWithin/$centerSphere)                                    #
 # --------------------------------------------------------------------------- #
 def test_radius_search_finds_manual_job_with_loc(jobs_module):
-    """Job manuel avec `loc` est retrouvé par la recherche rayon ($geoWithin/$centerSphere)."""
+    """Job manuel avec `loc` est retrouvé par la recherche rayon ($geoWithin/$centerSphere).
+    Appelle le vrai `search_jobs` et vérifie que la requête capturée contient
+    `loc.$geoWithin.$centerSphere`.
+    """
     client = _FakeClient()
     client.db.users.seed_user(premium_credits=0)
     client.db.companies.seed_company(COMPANY_ID)
@@ -738,41 +803,43 @@ def test_radius_search_finds_manual_job_with_loc(jobs_module):
     client.db.jobs.seed_job("job_manual_paris", **{
         "_id": "job_manual_paris", "employer_id": USER_ID, "location": "Paris",
         "title": "Dev Paris", "loc": {"type": "Point", "coordinates": [2.3522, 48.8566]},
-        "is_active": True, "is_premium": False, "created_at": "2026-01-01T00:00:00"
+        "is_active": True, "is_premium": False, "created_at": datetime(2026, 1, 1)
     })
     # Job sans loc (ne doit pas être retrouvé par rayon)
     client.db.jobs.seed_job("job_no_loc", **{
         "_id": "job_no_loc", "employer_id": USER_ID, "location": "Lyon",
-        "title": "Dev Lyon", "is_active": True, "is_premium": False, "created_at": "2026-01-01T00:00:00"
+        "title": "Dev Lyon", "is_active": True, "is_premium": False, "created_at": datetime(2026, 1, 1)
     })
     # Job partenaire avec loc (pour vérifier que la logique de recherche est inchangée)
     client.db.jobs.seed_job("job_partner_paris", **{
         "_id": "job_partner_paris", "employer_id": USER_ID, "location": "Paris",
         "title": "Partner Dev Paris", "loc": {"type": "Point", "coordinates": [2.3522, 48.8566]},
-        "is_active": True, "is_premium": False, "is_partner": True, "created_at": "2026-01-01T00:00:00"
+        "is_active": True, "is_premium": False, "is_partner": True, "created_at": datetime(2026, 1, 1)
     })
     user = _wire(jobs_module, client)
 
-    # Simuler la recherche rayon comme dans search_jobs (lignes 185-188)
+    captured_query = {}
+
     async def mock_geocode(loc):
         if loc == "Paris":
             return [2.3522, 48.8566]
         return None
     jobs_module.geocode_place = mock_geocode
 
+    # Wrap the collection's find to capture the query
+    original_find = client.db.jobs.find
+    def capturing_find(query):
+        nonlocal captured_query
+        captured_query = query
+        return original_find(query)
+    client.db.jobs.find = capturing_find
+
     async def run_search():
-        db = client.db
-        radius = 10.0  # 10 km
-        center = await jobs_module.geocode_place("Paris")
-        assert center is not None
-        # Rayon en radians : km / 6378.1 (rayon Terre)
-        query = {"loc": {"$geoWithin": {"$centerSphere": [center, float(radius) / 6378.1]}}}
-        query["is_active"] = True
-        cursor = db.jobs.find(query)
-        return await cursor.to_list(length=100)
+        # Appel direct à search_jobs avec location="Paris", radius=10
+        return await jobs_module.search_jobs(location="Paris", radius=10.0, page=1, limit=20)
 
     results = asyncio.run(run_search())
-    ids = {r["_id"] for r in results}
+    ids = {r.id for r in results.jobs}
 
     # Le job manuel avec loc DOIT être retrouvé
     assert "job_manual_paris" in ids
@@ -780,6 +847,14 @@ def test_radius_search_finds_manual_job_with_loc(jobs_module):
     assert "job_partner_paris" in ids
     # Le job sans loc NE DOIT PAS être retrouvé
     assert "job_no_loc" not in ids
+
+    # Vérifier que la requête capturée contient loc.$geoWithin.$centerSphere
+    assert "loc" in captured_query
+    assert "$geoWithin" in captured_query["loc"]
+    assert "$centerSphere" in captured_query["loc"]["$geoWithin"]
+    center_sphere = captured_query["loc"]["$geoWithin"]["$centerSphere"]
+    assert center_sphere[0] == [2.3522, 48.8566]
+    assert abs(center_sphere[1] - (10.0 / 6378.1)) < 1e-10
 
 
 def test_radius_search_excludes_job_without_loc(jobs_module):
