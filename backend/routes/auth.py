@@ -7,6 +7,7 @@ from auth import (
     get_password_hash, authenticate_user, create_access_token,
     get_current_active_user
 )
+from email_utils import canonical_email
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import httpx
@@ -60,8 +61,11 @@ async def register(user_data: UserCreate):
     """Register a new user"""
     db = await get_database()
     
-    # Check if user already exists
-    existing_user = await db.users.find_one({"email": user_data.email})
+    # P0-009: canonicalize email
+    email = canonical_email(user_data.email)
+    
+    # Check if user already exists (canonical lookup)
+    existing_user = await db.users.find_one({"email": email})
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -71,10 +75,11 @@ async def register(user_data: UserCreate):
     # Hash password
     hashed_password = get_password_hash(user_data.password)
     
-    # Create user document
+    # Create user document with canonical email
     user_doc = {
-        "_id": f"user_{user_data.email}_{hash(user_data.email)}",
-        **user_data.dict(exclude={"password"}),
+        "_id": f"user_{email}_{hash(email)}",
+        **{k: v for k, v in user_data.dict().items() if k != "email"},
+        "email": email,
         "hashed_password": hashed_password,
         "is_active": True,
         "is_verified": False,
@@ -85,10 +90,10 @@ async def register(user_data: UserCreate):
     # Insert user
     await db.users.insert_one(user_doc)
     
-    # Create access token
+    # Create access token with canonical sub
     access_token_expires = timedelta(minutes=30 * 24)  # 30 days
     access_token = create_access_token(
-        data={"sub": user_data.email},
+        data={"sub": email},
         expires_delta=access_token_expires
     )
     
@@ -120,7 +125,8 @@ async def register_partner(data: PartnerRegisterRequest):
     import os
     db = await get_database()
 
-    email = data.email.strip().lower()
+    # P0-009: canonicalize email
+    email = canonical_email(data.email)
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email déjà utilisé")
 
@@ -221,10 +227,10 @@ async def login(login_data: LoginRequest):
                 ),
             )
     
-    # Create access token
+    # Create access token with canonical sub
     access_token_expires = timedelta(minutes=30 * 24)  # 30 days
     access_token = create_access_token(
-        data={"sub": user.email},
+        data={"sub": canonical_email(user.email)},
         expires_delta=access_token_expires
     )
     
@@ -265,10 +271,13 @@ async def google_session(payload: GoogleSessionRequest):
         raise HTTPException(status_code=401, detail="Session Google invalide")
 
     data = resp.json()
-    email = data.get("email")
+    email_raw = data.get("email")
     name = data.get("name") or ""
-    if not email:
+    if not email_raw:
         raise HTTPException(status_code=401, detail="Email Google introuvable")
+
+    # P0-009: canonicalize email
+    email = canonical_email(email_raw)
 
     db = await get_database()
     user_doc = await db.users.find_one({"email": email})
@@ -298,7 +307,7 @@ async def google_session(payload: GoogleSessionRequest):
         await db.users.insert_one(user_doc)
 
     access_token = create_access_token(
-        data={"sub": email},
+        data={"sub": canonical_email(email)},
         expires_delta=timedelta(minutes=30 * 24 * 60),
     )
     return LoginResponse(user=_build_user_response(user_doc), token=Token(access_token=access_token))

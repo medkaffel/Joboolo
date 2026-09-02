@@ -6,7 +6,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from models import User, TokenData
 from database import get_database
-import re
+from email_utils import canonical_email
 
 # Configuration (P0-001 : source unique, aucun secret codé en dur).
 # SECRET_KEY est peuplé dynamiquement par la config centralisée et validé au
@@ -51,22 +51,15 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 async def get_user_by_email(email: str) -> Optional[User]:
-    """Get user by email"""
-    db = await get_database()
-    user_data = await db.users.find_one({"email": email})
-    if user_data:
-        return User(**user_data)
-    return None
+    """Get user by email (P0-009: canonical lookup)."""
+    from email_utils import lookup_user_by_email
+    return await lookup_user_by_email(email)
 
 async def authenticate_user(email: str, password: str) -> Optional[User]:
-    """Authenticate user with email and password (email match is case-insensitive)."""
-    db = await get_database()
-    user_data = await db.users.find_one(
-        {"email": {"$regex": f"^{re.escape((email or '').strip())}$", "$options": "i"}}
-    )
-    if not user_data:
+    """Authenticate user with email and password (P0-009: canonical lookup)."""
+    user = await get_user_by_email(email)
+    if not user:
         return None
-    user = User(**user_data)
     if not user.hashed_password:
         # OAuth-only account (e.g. Google) has no password
         return None
@@ -88,6 +81,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception
+        # P0-009: normalize JWT sub to canonical form before lookup
+        email = canonical_email(email)
         token_data = TokenData(email=email)
     except JWTError:
         raise credentials_exception

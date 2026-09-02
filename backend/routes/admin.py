@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from database import get_database
 from auth import require_admin, get_password_hash, get_user_by_email
+from email_utils import canonical_email
 from models import (
     User, AdminUserUpdate, PartnerCreate, PartnerConfigUpdate, PartnerBillingMode
 )
@@ -182,14 +183,16 @@ async def validate_partner(user_id: str, admin: User = Depends(require_admin)):
 @router.post("/partners")
 async def create_partner(data: PartnerCreate, admin: User = Depends(require_admin)):
     db = await get_database()
-    if await get_user_by_email(data.email):
+    # P0-009: canonicalize email
+    email = canonical_email(data.email)
+    if await get_user_by_email(email):
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
 
     user_id = f"partner_{uuid.uuid4()}"
     now = datetime.utcnow()
     user_doc = {
         "_id": user_id,
-        "email": data.email,
+        "email": email,
         "first_name": data.first_name,
         "last_name": data.last_name,
         "user_type": "partner",
@@ -331,7 +334,8 @@ async def create_xml_feed(data: XmlFeedCreate, admin: User = Depends(require_adm
         # Create a login-less partner
         if not data.new_partner_company:
             raise HTTPException(status_code=400, detail="Nom du partenaire requis")
-        email = (data.new_partner_email or f"feed-{uuid.uuid4().hex[:8]}@partenaire.joboolo").lower()
+        # P0-009: canonicalize email
+        email = canonical_email(data.new_partner_email or f"feed-{uuid.uuid4().hex[:8]}@partenaire.joboolo")
         if await get_user_by_email(email):
             raise HTTPException(status_code=400, detail="Email déjà utilisé")
         partner_id = f"partner_{uuid.uuid4()}"

@@ -55,8 +55,11 @@ def _parse_args(argv):
 async def _ensure_admin(email: str, password: str) -> str:
     from database import get_database
     from auth import get_password_hash
+    from email_utils import canonical_email
 
     db = await get_database()
+    # P0-009: canonicalize email
+    email = canonical_email(email)
     existing = await db.users.find_one({"email": email})
     if existing:
         return "exists"

@@ -5,6 +5,7 @@ from models import (
 )
 from database import get_database
 from auth import get_current_active_user
+from email_utils import canonical_email
 from datetime import datetime
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
@@ -29,7 +30,8 @@ async def subscribe_alert(data: AlertSubscribe):
     """Public: save a search as an alert by email. Creates a lightweight candidate
     account if the email is unknown (same process as an authenticated alert)."""
     db = await get_database()
-    email = data.email.lower().strip()
+    # P0-009: canonicalize email
+    email = canonical_email(data.email)
 
     user = await db.users.find_one({"email": email})
     if not user:
