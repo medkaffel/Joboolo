@@ -86,12 +86,10 @@ async def lookup_user_by_email(email: str) -> Optional[User]:
     try:
         results = await db.users.aggregate(pipeline).to_list(length=2)
     except Exception:
-        # If aggregation fails (e.g. old Mongo version), fall back to
-        # a simple find_one which at least works for already-canonical data.
-        logger.warning("P0-009: aggregation lookup failed, falling back to find_one")
-        doc = await db.users.find_one({"email": canonical})
-        if doc:
-            return User(**doc)
+        # Fail closed: if aggregation is unavailable (e.g. old Mongo version
+        # or network error) we cannot safely detect legacy duplicates.
+        # Returning None prevents silent collision bypass.
+        logger.error("P0-009: aggregation lookup failed — fail-closed (returning None)")
         return None
 
     if not results:

@@ -7,7 +7,7 @@ from auth import (
     get_password_hash, authenticate_user, create_access_token,
     get_current_active_user
 )
-from email_utils import canonical_email
+from email_utils import canonical_email, lookup_user_by_email
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import httpx
@@ -64,9 +64,8 @@ async def register(user_data: UserCreate):
     # P0-009: canonicalize email
     email = canonical_email(user_data.email)
     
-    # Check if user already exists (canonical lookup)
-    existing_user = await db.users.find_one({"email": email})
-    if existing_user:
+    # P0-009: transitionnal lookup — catches legacy non-canonical duplicates
+    if await lookup_user_by_email(email):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
@@ -88,7 +87,20 @@ async def register(user_data: UserCreate):
     }
     
     # Insert user
-    await db.users.insert_one(user_doc)
+    try:
+        await db.users.insert_one(user_doc)
+    except Exception:
+        # P0-009: DuplicateKeyError race — re-lookup transitionnally
+        existing = await lookup_user_by_email(email)
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered"
+        )
     
     # Create access token with canonical sub
     access_token_expires = timedelta(minutes=30 * 24)  # 30 days
@@ -127,30 +139,36 @@ async def register_partner(data: PartnerRegisterRequest):
 
     # P0-009: canonicalize email
     email = canonical_email(data.email)
-    if await db.users.find_one({"email": email}):
+    if await lookup_user_by_email(email):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email déjà utilisé")
 
     now = datetime.utcnow()
     user_id = f"partner_{_uuid.uuid4()}"
-    await db.users.insert_one({
-        "_id": user_id,
-        "email": email,
-        "first_name": data.first_name,
-        "last_name": data.last_name,
-        "user_type": "partner",
-        "hashed_password": get_password_hash(data.password),
-        "phone": None, "location": None, "bio": None, "skills": [], "experience_years": None,
-        "is_active": False,          # en attente de validation admin
-        "is_verified": False,
-        "pending_validation": True,
-        "signup_source": data.signup_source,
-        "signup_referrer": data.signup_referrer,
-        "signup_landing": data.signup_landing,
-        "utm_source": data.utm_source,
-        "utm_medium": data.utm_medium,
-        "utm_campaign": data.utm_campaign,
-        "created_at": now, "updated_at": now,
-    })
+    try:
+        await db.users.insert_one({
+            "_id": user_id,
+            "email": email,
+            "first_name": data.first_name,
+            "last_name": data.last_name,
+            "user_type": "partner",
+            "hashed_password": get_password_hash(data.password),
+            "phone": None, "location": None, "bio": None, "skills": [], "experience_years": None,
+            "is_active": False,          # en attente de validation admin
+            "is_verified": False,
+            "pending_validation": True,
+            "signup_source": data.signup_source,
+            "signup_referrer": data.signup_referrer,
+            "signup_landing": data.signup_landing,
+            "utm_source": data.utm_source,
+            "utm_medium": data.utm_medium,
+            "utm_campaign": data.utm_campaign,
+            "created_at": now, "updated_at": now,
+        })
+    except Exception:
+        existing = await lookup_user_by_email(email)
+        if existing:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email déjà utilisé")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email déjà utilisé")
     await db.partner_profiles.insert_one({
         "_id": str(_uuid.uuid4()),
         "user_id": user_id,
@@ -280,9 +298,15 @@ async def google_session(payload: GoogleSessionRequest):
     email = canonical_email(email_raw)
 
     db = await get_database()
-    user_doc = await db.users.find_one({"email": email})
-
-    if not user_doc:
+    # P0-009: transitionnal lookup — reuse legacy account if found
+    existing_user = await lookup_user_by_email(email)
+    if existing_user:
+        user_doc = {"_id": existing_user.id, "email": existing_user.email,
+                     "first_name": existing_user.first_name, "last_name": existing_user.last_name,
+                     "user_type": existing_user.user_type, "hashed_password": getattr(existing_user, "hashed_password", ""),
+                     "is_active": existing_user.is_active, "is_verified": getattr(existing_user, "is_verified", False),
+                     "created_at": existing_user.created_at}
+    else:
         parts = name.split(" ", 1)
         first_name = parts[0] if parts and parts[0] else email.split("@")[0]
         last_name = parts[1] if len(parts) > 1 else ""
@@ -304,7 +328,19 @@ async def google_session(payload: GoogleSessionRequest):
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
         }
-        await db.users.insert_one(user_doc)
+        try:
+            await db.users.insert_one(user_doc)
+        except Exception:
+            # P0-009: DuplicateKeyError race — re-lookup
+            existing = await lookup_user_by_email(email)
+            if existing:
+                user_doc = {"_id": existing.id, "email": existing.email,
+                             "first_name": existing.first_name, "last_name": existing.last_name,
+                             "user_type": existing.user_type, "hashed_password": getattr(existing, "hashed_password", ""),
+                             "is_active": existing.is_active, "is_verified": getattr(existing, "is_verified", False),
+                             "created_at": existing.created_at}
+            else:
+                raise HTTPException(status_code=409, detail="Collision d'email lors de la création du compte")
 
     access_token = create_access_token(
         data={"sub": canonical_email(email)},

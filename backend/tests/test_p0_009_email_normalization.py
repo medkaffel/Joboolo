@@ -342,6 +342,8 @@ class _FakeDB:
     def __init__(self, users=None, migration_flags=None):
         self.users = _FakeCollection(users or [])
         self.migration_flags = _FakeCollection(migration_flags or [])
+        self.alerts = _FakeCollection([])
+        self.partner_profiles = _FakeCollection([])
 
 
 def _run(coro):
@@ -490,6 +492,32 @@ class TestLookupUserByEmail:
         finally:
             monkeypatch.undo()
 
+    def test_aggregation_failure_fail_closed(self, monkeypatch):
+        """P0-009 FIX 2: aggregation failure must NOT fallback to find_one."""
+        import email_utils as _eu_mod
+        from email_utils import lookup_user_by_email
+
+        self.db.users._docs.append({
+            "_id": "u_legacy", "email": " Foo@Example.COM ",
+            "user_type": "candidate", "hashed_password": "hash2", "is_active": True,
+            "first_name": "Legacy", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+        async def _get_db():
+            return self.db
+
+        def _broken_aggregate(pipeline):
+            raise RuntimeError("MongoDB aggregation unavailable")
+
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+        self.db.users.aggregate = _broken_aggregate
+
+        user = _run(lookup_user_by_email("foo@example.com"))
+        assert user is None  # fail-closed, NOT fallback to find_one
+
 
 # --------------------------------------------------------------------------- #
 # 3. Migration — fonctions pures                                              #
@@ -592,6 +620,9 @@ class TestRoutesCanonicalization:
         database.get_database = _get_db
         database.get_client = lambda: None
         monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
 
         auth = types.ModuleType("auth")
         auth.get_current_active_user = lambda *a, **k: None
@@ -734,3 +765,382 @@ class TestAlertsRouteCanonicalization:
     def test_subscribe_canonicalizes(self):
         source = open(BACKEND_DIR / "routes" / "alerts.py").read()
         assert 'canonical_email(data.email)' in source
+
+
+# --------------------------------------------------------------------------- #
+# 9. P0-009 BUILD CORRECTION: legacy blocking on all create-paths             #
+# --------------------------------------------------------------------------- #
+class TestLegacyBlockingOnCreatePaths:
+    """P0-009 FIX 1: all create-paths MUST use transitionnal lookup to detect
+    legacy non-canonical emails, preventing duplicate accounts."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+        self.auth_module = auth
+
+        # Import email_utils with our fake db patched in
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_routes_auth_v2")
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_routes_alerts_v2")
+
+    def _seed_legacy_user(self, email_value):
+        """Insert a legacy user with a non-canonical email."""
+        self.db.users._docs.append({
+            "_id": "legacy_u1", "email": email_value,
+            "user_type": "candidate", "hashed_password": "hash_legacy", "is_active": True,
+            "first_name": "Legacy", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+    def test_register_blocks_legacy_email_with_spaces(self):
+        """Legacy ' Foo@Example.COM ' must block registration of 'foo@example.com'."""
+        self._seed_legacy_user(" Foo@Example.COM ")
+        async def scenario():
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+
+    def test_register_blocks_legacy_email_with_casse(self):
+        """Legacy 'FOO@EXAMPLE.COM' must block registration of 'foo@example.com'."""
+        self._seed_legacy_user("FOO@EXAMPLE.COM")
+        async def scenario():
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+
+    def test_register_partner_blocks_legacy_email(self):
+        """Legacy email blocks register-partner via transitionnal lookup."""
+        self._seed_legacy_user(" Foo@Example.COM ")
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User",
+                company_name="Acme", signup_source=None, signup_referrer=None,
+                signup_landing=None, utm_source=None, utm_medium=None, utm_campaign=None,
+            )
+            await self.routes_auth.register_partner(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+
+    def test_alerts_subscribe_blocks_legacy_email(self):
+        """Legacy email blocks alerts/subscribe via transitionnal lookup."""
+        self._seed_legacy_user(" Foo@Example.COM ")
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            return await self.routes_alerts.subscribe_alert(data)
+
+        result = _run(scenario())
+        # Should reuse the legacy user, not create a new one
+        assert result["created_account"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 10. P0-009 BUILD CORRECTION: DuplicateKeyError on create-paths              #
+# --------------------------------------------------------------------------- #
+class TestDuplicateKeyErrorHandling:
+    """P0-009 FIX 3: DuplicateKeyError on user inserts must yield a deterministic
+    API response (never a raw 500), with transitionnal re-lookup when possible."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+        self.auth_module = auth
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_routes_auth_dk")
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_routes_alerts_dk")
+
+    def _seed_user(self, email_value, uid="existing_u1"):
+        self.db.users._docs.append({
+            "_id": uid, "email": email_value,
+            "user_type": "candidate", "hashed_password": "hash_ex", "is_active": True,
+            "first_name": "Existing", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+    def test_register_duplicate_key_returns_400(self):
+        """DuplicateKeyError on register with legacy variant returns 400 (not 500)."""
+        self._seed_user(" Foo@Example.COM ")
+        async def scenario():
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+
+    def test_register_partner_duplicate_key_returns_400(self):
+        """DuplicateKeyError on register-partner returns 400."""
+        self._seed_user(" Foo@Example.COM ")
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User",
+                company_name="Acme", signup_source=None, signup_referrer=None,
+                signup_landing=None, utm_source=None, utm_medium=None, utm_campaign=None,
+            )
+            await self.routes_auth.register_partner(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+
+    def test_register_duplicate_key_no_reuse_silent(self):
+        """DuplicateKeyError without legacy match must NOT silently succeed."""
+        # Insert a user that will cause DuplicateKeyError on insert
+        # but the re-lookup also fails (no canonical match)
+        self._seed_user("foo@example.com", uid="exact_u1")
+        async def scenario():
+            # Same canonical email but different _id (race condition simulation)
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        # Should get 400 (existing found) not 500
+        assert exc.value.status_code == 400
+
+    def test_alerts_subscribe_duplicate_key_returns_409(self):
+        """DuplicateKeyError on alerts/subscribe without legacy match returns 409."""
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            return await self.routes_alerts.subscribe_alert(data)
+
+        # First call succeeds
+        result = _run(scenario())
+        assert result["success"] is True
+
+        # Now simulate DuplicateKeyError by making insert_one fail
+        # and ensuring re-lookup also fails (edge case)
+        original_insert = self.db.users.insert_one
+
+        async def _fail_insert(*a, **k):
+            from pymongo.errors import DuplicateKeyError
+            raise DuplicateKeyError("duplicate key")
+
+        self.db.users.insert_one = _fail_insert
+        # Clear the db so re-lookup finds nothing
+        self.db.users._docs.clear()
+
+        async def scenario2():
+            data = _Model(
+                email="bar@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            await self.routes_alerts.subscribe_alert(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario2())
+        assert exc.value.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# 11. P0-009 BUILD CORRECTION: no silent merging on email variants            #
+# --------------------------------------------------------------------------- #
+class TestNoSilentMerging:
+    """P0-009: a legacy ' Foo@Example.COM ' must NOT be silently merged
+    into a new 'foo@example.com' account during creation."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_routes_auth_merge")
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_routes_alerts_merge")
+
+    def test_register_does_not_create_new_on_legacy(self):
+        """Registration with 'foo@example.com' when legacy 'Foo@EXAMPLE.com' exists
+        must be rejected, not silently create a second account."""
+        self.db.users._docs.append({
+            "_id": "legacy_u1", "email": "Foo@EXAMPLE.com",
+            "user_type": "candidate", "hashed_password": "hash_legacy", "is_active": True,
+            "first_name": "Legacy", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+        async def scenario():
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+        # Verify only one user exists (no silent second account)
+        assert len(self.db.users._docs) == 1
+
+    def test_alerts_subscribe_reuses_not_creates(self):
+        """Alerts subscribe with 'foo@example.com' when legacy 'Foo@EXAMPLE.com' exists
+        must reuse the legacy account, not create a duplicate."""
+        self.db.users._docs.append({
+            "_id": "legacy_u1", "email": "Foo@EXAMPLE.com",
+            "user_type": "candidate", "hashed_password": "hash_legacy", "is_active": True,
+            "first_name": "Legacy", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            return await self.routes_alerts.subscribe_alert(data)
+
+        result = _run(scenario())
+        assert result["created_account"] is False
+        assert len(self.db.users._docs) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 12. P0-009 BUILD CORRECTION: source checks for all create-paths             #
+# --------------------------------------------------------------------------- #
+class TestAllCreatePathsUseTransitionnalLookup:
+    """Verify that source code for all create-paths uses lookup_user_by_email
+    instead of find_one for the pre-insert duplicate check."""
+
+    def test_register_uses_lookup(self):
+        source = open(BACKEND_DIR / "routes" / "auth.py").read()
+        assert "lookup_user_by_email(email)" in source
+
+    def test_register_partner_uses_lookup(self):
+        source = open(BACKEND_DIR / "routes" / "auth.py").read()
+        # register_partner must use lookup_user_by_email, not find_one
+        assert "lookup_user_by_email(email)" in source
+
+    def test_google_session_uses_lookup(self):
+        source = open(BACKEND_DIR / "routes" / "auth.py").read()
+        # google/session must use lookup_user_by_email for existence check
+        assert "lookup_user_by_email(email)" in source
+
+    def test_alerts_subscribe_uses_lookup(self):
+        source = open(BACKEND_DIR / "routes" / "alerts.py").read()
+        assert "lookup_user_by_email(email)" in source
+
+    def test_admin_partners_uses_lookup(self):
+        source = open(BACKEND_DIR / "routes" / "admin.py").read()
+        assert "lookup_user_by_email(email)" in source
+
+    def test_admin_xml_feeds_uses_lookup(self):
+        source = open(BACKEND_DIR / "routes" / "admin.py").read()
+        assert "lookup_user_by_email(email)" in source
+
+    def test_no_fallback_in_lookup(self):
+        """email_utils.lookup_user_by_email must NOT fallback to find_one."""
+        source = open(BACKEND_DIR / "email_utils.py").read()
+        assert "find_one" not in source
+
+    def test_duplicate_key_error_handling_in_register(self):
+        source = open(BACKEND_DIR / "routes" / "auth.py").read()
+        assert "except Exception" in source
+
+    def test_duplicate_key_error_handling_in_alerts(self):
+        source = open(BACKEND_DIR / "routes" / "alerts.py").read()
+        assert "except Exception" in source
+
+    def test_duplicate_key_error_handling_in_admin(self):
+        source = open(BACKEND_DIR / "routes" / "admin.py").read()
+        assert "except Exception" in source

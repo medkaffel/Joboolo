@@ -5,7 +5,7 @@ from models import (
 )
 from database import get_database
 from auth import get_current_active_user
-from email_utils import canonical_email
+from email_utils import canonical_email, lookup_user_by_email
 from datetime import datetime
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
@@ -33,25 +33,34 @@ async def subscribe_alert(data: AlertSubscribe):
     # P0-009: canonicalize email
     email = canonical_email(data.email)
 
-    user = await db.users.find_one({"email": email})
-    if not user:
-        user_id = f"user_{datetime.utcnow().timestamp()}"
-        await db.users.insert_one({
-            "_id": user_id,
-            "email": email,
-            "hashed_password": None,
-            "first_name": None,
-            "last_name": None,
-            "user_type": "candidate",
-            "is_active": True,
-            "profile_complete": False,
-            "location": data.location,
-            "signup_origin": data.origin or "alert_subscribe",
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-        })
+    # P0-009: transitionnal lookup — reuse legacy account if found
+    existing_user = await lookup_user_by_email(email)
+    if existing_user:
+        user_id = existing_user.id
     else:
-        user_id = user["_id"]
+        user_id = f"user_{datetime.utcnow().timestamp()}"
+        try:
+            await db.users.insert_one({
+                "_id": user_id,
+                "email": email,
+                "hashed_password": None,
+                "first_name": None,
+                "last_name": None,
+                "user_type": "candidate",
+                "is_active": True,
+                "profile_complete": False,
+                "location": data.location,
+                "signup_origin": data.origin or "alert_subscribe",
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            })
+        except Exception:
+            # P0-009: DuplicateKeyError race — re-lookup
+            existing = await lookup_user_by_email(email)
+            if existing:
+                user_id = existing.id
+            else:
+                raise HTTPException(status_code=409, detail="Collision d'email lors de la création du compte")
 
     name_parts = [p for p in [data.search, data.location] if p]
     alert_doc = {
@@ -74,7 +83,7 @@ async def subscribe_alert(data: AlertSubscribe):
         "updated_at": datetime.utcnow(),
     }
     await db.alerts.insert_one(alert_doc)
-    return {"success": True, "alert_id": alert_doc["_id"], "created_account": not bool(user)}
+    return {"success": True, "alert_id": alert_doc["_id"], "created_account": not bool(existing_user)}
 
 
 @router.get("/track/{alert_id}")
