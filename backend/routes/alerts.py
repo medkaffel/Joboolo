@@ -5,7 +5,7 @@ from models import (
 )
 from database import get_database
 from auth import get_current_active_user
-from email_utils import canonical_email, lookup_user_by_email, LookupAggregationError, LookupCollisionError
+from email_utils import canonical_email, lookup_user_doc_by_email, LookupAggregationError, LookupCollisionError
 from datetime import datetime
 import pymongo.errors
 
@@ -36,7 +36,7 @@ async def subscribe_alert(data: AlertSubscribe):
 
     # P0-009: transitionnal lookup — reuse legacy account if found
     try:
-        existing_user = await lookup_user_by_email(email)
+        existing_user = await lookup_user_doc_by_email(email)
     except (LookupAggregationError, LookupCollisionError):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -45,7 +45,7 @@ async def subscribe_alert(data: AlertSubscribe):
 
     created_account = False
     if existing_user:
-        user_id = existing_user.id
+        user_id = existing_user["_id"]
     else:
         user_id = f"user_{datetime.utcnow().timestamp()}"
         try:
@@ -67,14 +67,14 @@ async def subscribe_alert(data: AlertSubscribe):
         except pymongo.errors.DuplicateKeyError:
             # P0-009: DuplicateKeyError race — re-lookup
             try:
-                existing = await lookup_user_by_email(email)
+                existing = await lookup_user_doc_by_email(email)
             except (LookupAggregationError, LookupCollisionError):
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Email lookup temporarily unavailable, please retry"
                 )
             if existing:
-                user_id = existing.id
+                user_id = existing["_id"]
                 created_account = False
             else:
                 raise HTTPException(status_code=409, detail="Collision d'email lors de la création du compte")

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import ValidationError
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from models import User, TokenData
@@ -53,27 +54,53 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 async def get_user_by_email(email: str) -> Optional[User]:
     """Get user by email (P0-009: canonical lookup).
 
-    Raises ``LookupAggregationError`` or ``LookupCollisionError`` on
-    ambiguous states — callers MUST propagate or fail-closed.
+    Returns a strict ``User`` for legitimate full accounts.  Raises
+    ``LookupAggregationError`` or ``LookupCollisionError`` on ambiguous
+    states — callers MUST propagate or fail-closed.
     """
     from email_utils import lookup_user_by_email
     return await lookup_user_by_email(email)
 
+
+def _user_from_raw_doc(doc: dict) -> Optional[User]:
+    """Build a strict ``User`` from a raw Mongo document, returning ``None``
+    if the document is incomplete (lightweight/OAuth/XML account).
+
+    This is used by paths that need a full ``User`` model but where the
+    document may be incomplete.  Returning ``None`` is fail-closed:
+    the caller treats the account as non-selectable rather than crashing.
+    """
+    if doc is None:
+        return None
+    from models import User
+    try:
+        return User(**doc)
+    except ValidationError:
+        # Document is incomplete — account is lightweight, cannot be
+        # represented as a strict User.  Fail closed.
+        return None
+
+
 async def authenticate_user(email: str, password: str) -> Optional[User]:
     """Authenticate user with email and password (P0-009: canonical lookup).
+
+    Uses the raw-doc lookup so lightweight accounts (OAuth-only, XML
+    login-less) with ``hashed_password=None`` do not raise a
+    ``ValidationError`` during login.
 
     Raises ``LookupAggregationError`` or ``LookupCollisionError`` on
     ambiguous lookup states — callers MUST propagate or fail-closed.
     """
-    user = await get_user_by_email(email)
-    if not user:
+    from email_utils import lookup_user_doc_by_email
+    doc = await lookup_user_doc_by_email(email)
+    if doc is None:
         return None
-    if not user.hashed_password:
+    if not doc.get("hashed_password"):
         # OAuth-only account (e.g. Google) has no password
         return None
-    if not verify_password(password, user.hashed_password):
+    if not verify_password(password, doc["hashed_password"]):
         return None
-    return user
+    return _user_from_raw_doc(doc)
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
     """Get current authenticated user"""
@@ -95,11 +122,26 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except (JWTError, ValueError):
         raise credentials_exception
     
-    user = await get_user_by_email(email=token_data.email)
+    # P0-009: use the tolerant raw-doc lookup so lightweight accounts
+    # (e.g. XML partners / OAuth) do not raise a ValidationError here.
+    # LookupAggregationError / LookupCollisionError must map to a
+    # controlled 503 (consistent with /auth/login), never a raw 500.
+    from email_utils import lookup_user_doc_by_email, LookupAggregationError, LookupCollisionError
+    try:
+        doc = await lookup_user_doc_by_email(email=token_data.email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+    if doc is None:
+        # Email unknown — the JWT cannot be resolved.
+        raise credentials_exception
+
+    user = _user_from_raw_doc(doc)
     if user is None:
-        # P0-009: LookupAggregationError / LookupCollisionError propagate
-        # up as unhandled exceptions (HTTP 500) — the JWT cannot be
-        # resolved safely, so we MUST NOT select or create an account.
+        # Lightweight/incomplete account — cannot be represented / used as
+        # an authenticated session; fail closed.
         raise credentials_exception
     return user
 

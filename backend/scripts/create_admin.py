@@ -55,7 +55,7 @@ def _parse_args(argv):
 async def _ensure_admin(email: str, password: str) -> str:
     from database import get_database
     from auth import get_password_hash
-    from email_utils import canonical_email, lookup_user_by_email, \
+    from email_utils import canonical_email, lookup_user_doc_by_email, \
         LookupAggregationError, LookupCollisionError
     from pymongo.errors import DuplicateKeyError
 
@@ -64,7 +64,7 @@ async def _ensure_admin(email: str, password: str) -> str:
 
     # P0-009: transitionnal lookup — fail-closed on ambiguity
     try:
-        existing = await lookup_user_by_email(email)
+        existing = await lookup_user_doc_by_email(email)
     except (LookupAggregationError, LookupCollisionError) as exc:
         sys.stderr.write(
             f"Erreur: lookup transitionnel a échoué — {exc}\n"
@@ -96,7 +96,7 @@ async def _ensure_admin(email: str, password: str) -> str:
     except DuplicateKeyError:
         # P0-009: race — relookup transitionnel
         try:
-            existing = await lookup_user_by_email(email)
+            existing = await lookup_user_doc_by_email(email)
         except (LookupAggregationError, LookupCollisionError) as exc:
             sys.stderr.write(
                 f"Erreur: relookup après DuplicateKey a échoué — {exc}\n"

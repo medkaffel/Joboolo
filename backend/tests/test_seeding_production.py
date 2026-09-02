@@ -205,7 +205,7 @@ class TestCreateAdminScript:
         async def _lookup_none(email):
             return None
 
-        monkeypatch.setattr(_eu, "lookup_user_by_email", _lookup_none)
+        monkeypatch.setattr(_eu, "lookup_user_doc_by_email", _lookup_none)
 
         import asyncio
         result = asyncio.run(admin._ensure_admin("admin@exemple.fr", "a-forte-password"))
@@ -250,7 +250,7 @@ class TestCreateAdminScript:
         async def _lookup_exists(email):
             return Existing()
 
-        monkeypatch.setattr(_eu, "lookup_user_by_email", _lookup_exists)
+        monkeypatch.setattr(_eu, "lookup_user_doc_by_email", _lookup_exists)
 
         import asyncio
         result = asyncio.run(admin._ensure_admin("admin@exemple.fr", "whatever"))

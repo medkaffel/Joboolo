@@ -103,8 +103,14 @@ def _install_stubs(monkeypatch):
                  "UserCreate", "UserResponse", "LoginRequest", "LoginResponse",
                  "Token", "TokenData", "UserUpdate", "JobAlertCreate",
                  "JobAlertUpdate", "JobAlertResponse", "JobAlert",
-                 "PartnerCreate", "PartnerConfigUpdate", "PartnerBillingMode"):
+                 "PartnerCreate", "PartnerConfigUpdate", "AdminUserUpdate"):
         setattr(models, name, _Model)
+    # PartnerBillingMode needs PER_CLICK / PER_POSTING enum members
+    _PartnerBillingMode = type("PartnerBillingMode", (), {
+        "PER_CLICK": "per_click",
+        "PER_POSTING": "per_posting",
+    })
+    models.PartnerBillingMode = _PartnerBillingMode
     models.UserType = _UserType
     monkeypatch.setitem(sys.modules, "models", models)
 
@@ -1194,29 +1200,29 @@ class TestAllCreatePathsUseTransitionnalLookup:
 
     def test_register_uses_lookup(self):
         source = open(BACKEND_DIR / "routes" / "auth.py").read()
-        assert "lookup_user_by_email(email)" in source
+        assert "lookup_user_doc_by_email(email)" in source
 
     def test_register_partner_uses_lookup(self):
         source = open(BACKEND_DIR / "routes" / "auth.py").read()
-        # register_partner must use lookup_user_by_email, not find_one
-        assert "lookup_user_by_email(email)" in source
+        # register_partner must use lookup_user_doc_by_email, not find_one
+        assert "lookup_user_doc_by_email(email)" in source
 
     def test_google_session_uses_lookup(self):
         source = open(BACKEND_DIR / "routes" / "auth.py").read()
-        # google/session must use lookup_user_by_email for existence check
-        assert "lookup_user_by_email(email)" in source
+        # google/session must use lookup_user_doc_by_email for existence check
+        assert "lookup_user_doc_by_email(email)" in source
 
     def test_alerts_subscribe_uses_lookup(self):
         source = open(BACKEND_DIR / "routes" / "alerts.py").read()
-        assert "lookup_user_by_email(email)" in source
+        assert "lookup_user_doc_by_email(email)" in source
 
     def test_admin_partners_uses_lookup(self):
         source = open(BACKEND_DIR / "routes" / "admin.py").read()
-        assert "lookup_user_by_email(email)" in source
+        assert "lookup_user_doc_by_email(email)" in source
 
     def test_admin_xml_feeds_uses_lookup(self):
         source = open(BACKEND_DIR / "routes" / "admin.py").read()
-        assert "lookup_user_by_email(email)" in source
+        assert "lookup_user_doc_by_email(email)" in source
 
     def test_no_fallback_in_lookup(self):
         """email_utils.lookup_user_by_email must NOT fallback to find_one."""
@@ -2510,9 +2516,9 @@ class TestCreateAdminTransitionnalLookup:
         assert len(self.db.users._docs) == 0
 
     def test_source_uses_lookup_before_insert_and_no_broad_except(self):
-        """create_admin must use lookup_user_by_email, no find_one, no broad except."""
+        """create_admin must use lookup_user_doc_by_email, no find_one, no broad except."""
         source = open(BACKEND_DIR / "scripts" / "create_admin.py").read()
-        assert "lookup_user_by_email(email)" in source
+        assert "lookup_user_doc_by_email(email)" in source
         assert 'db.users.find_one({"email": email})' not in source
         # No broad except Exception anywhere
         assert "except Exception:" not in source
@@ -2581,36 +2587,474 @@ class TestGetCurrentUserInvalidSub:
             _run(self.auth.get_current_user(self._creds()))
         assert exc.value.status_code == 401
 
-    def test_noncanonical_jwt_resolves_legacy_account(self):
+    def test_noncanonical_jwt_resolves_legacy_account(self, monkeypatch):
         """Old JWT with non-canonical sub resolves the legacy account via lookup.
         get_current_user canonicalizes the sub BEFORE lookup, so a legacy
         ' Foo@Example.COM ' account is still found."""
         import auth as _auth_mod
+        import email_utils as _eu
         from models import User
 
         captured = {}
 
-        async def _get_by_email(email):
+        async def _lookup_doc(email):
             captured["email"] = email
-            return User(
-                id="legacy_u", email=" Foo@Example.COM ",
-                first_name="Foo", last_name="Bar", user_type="candidate",
-                phone=None, location=None, bio=None, skills=[],
-                experience_years=None, is_active=True, is_verified=False,
-                hashed_password="h", created_at=datetime.utcnow(),
-            )
+            return {
+                "_id": "legacy_u",
+                "email": " Foo@Example.COM ",
+                "first_name": "Foo",
+                "last_name": "Bar",
+                "user_type": "candidate",
+                "phone": None,
+                "location": None,
+                "bio": None,
+                "skills": [],
+                "experience_years": None,
+                "is_active": True,
+                "is_verified": False,
+                "hashed_password": "h",
+                "created_at": datetime.utcnow(),
+            }
 
-        _auth_mod.get_user_by_email = _get_by_email
+        # Patch email_utils.lookup_user_doc_by_email (auth.get_current_user
+        # imports it lazily via `from email_utils import lookup_user_doc_by_email`).
+        monkeypatch.setattr(_eu, "lookup_user_doc_by_email", _lookup_doc)
+
         self.decode_outcome["payload"] = {"sub": " Foo@Example.COM "}
 
         result = _run(self.auth.get_current_user(self._creds()))
         # canonical_email applied before lookup → email canonicalized
         assert captured["email"] == "foo@example.com"
-        # The legacy account is resolved (result not None / not 401) and its
-        # canonical email matches (whitespace/case of the stored value removed).
+        # The legacy account is resolved (result not None / not 401)
         assert result is not None
         assert str(result.email).strip().lower() == "foo@example.com"
 
     def test_source_catches_value_error(self):
         source = open(BACKEND_DIR / "auth.py").read()
         assert "(JWTError, ValueError)" in source
+
+
+# --------------------------------------------------------------------------- #
+# 32. P0-009 BUILD CORRECTION: tolerant raw-doc lookup for lightweight users  #
+# --------------------------------------------------------------------------- #
+class TestTolerantLookupForLightweightUsers:
+    """P0-009: lookup_user_doc_by_email() returns the raw Mongo document so
+    paths that handle lightweight/incomplete accounts (alert subscribe, XML
+    partners, admin legacy, OAuth) never crash with a ValidationError when
+    first_name/last_name/hashed_password are None."""
+
+    def test_lookup_user_doc_returns_raw_dict_for_incomplete_user(self, monkeypatch):
+        """A lightweight user (first_name=None, last_name=None, hashed_password=None)
+        must be returned as a raw dict, NOT crash with ValidationError."""
+        import email_utils as _eu
+        db = _FakeDB(users=[
+            # Lightweight alert account
+            {"_id": "light_u", "email": " foo@example.com ",
+             "hashed_password": None, "first_name": None, "last_name": None,
+             "user_type": "candidate", "is_active": True,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+        ])
+        db_ref = db
+
+        async def _get_db():
+            return db_ref
+
+        monkeypatch.setattr(_eu, "get_database", _get_db)
+        from email_utils import lookup_user_doc_by_email, LookupCollisionError, LookupAggregationError
+        doc = _run(lookup_user_doc_by_email("foo@example.com"))
+        assert doc is not None
+        assert doc["_id"] == "light_u"
+        assert doc["first_name"] is None  # raw doc preserved, no validation
+
+    def test_lookup_user_model_validation_error_on_incomplete(self, monkeypatch):
+        """Sanity: constructing the strict User from an incomplete lightweight
+        doc raises — proving the tolerant doc lookup is what prevents the 500."""
+        import email_utils as _eu
+        from models import User
+        db = _FakeDB(users=[
+            {"_id": "light_u", "email": " foo@example.com ",
+             "hashed_password": None, "first_name": None, "last_name": None,
+             "user_type": "candidate", "is_active": True,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+        ])
+        db_ref = db
+
+        async def _get_db():
+            return db_ref
+
+        monkeypatch.setattr(_eu, "get_database", _get_db)
+        from email_utils import lookup_user_by_email
+        with pytest.raises(Exception) as exc:
+            _run(lookup_user_by_email("foo@example.com"))
+        # A ValidationError (strict User requires str fields) proves the issue
+        assert "ValidationError" in type(exc.value).__name__ or "first_name" in str(exc.value)
+
+    def test_collision_still_raises_on_doc_lookup(self, monkeypatch):
+        """The tolerant doc lookup must still fail-closed on collision."""
+        import email_utils as _eu
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "foo@example.com", "hashed_password": None,
+             "first_name": None, "last_name": None},
+            {"_id": "u2", "email": " Foo@Example.COM ", "hashed_password": None,
+             "first_name": None, "last_name": None},
+        ])
+        db_ref = db
+
+        async def _get_db():
+            return db_ref
+
+        monkeypatch.setattr(_eu, "get_database", _get_db)
+        from email_utils import lookup_user_doc_by_email, LookupCollisionError
+        with pytest.raises(LookupCollisionError):
+            _run(lookup_user_doc_by_email("foo@example.com"))
+
+
+# --------------------------------------------------------------------------- #
+# 33. P0-009 BUILD CORRECTION: /alerts/subscribe lightweight reuse            #
+# --------------------------------------------------------------------------- #
+class TestAlertsSubscribeLightweightReuse:
+    """(a) /alerts/subscribe creates a lightweight account then a second
+    subscribe with the same email/variant reuses it (created_account=False,
+    no 500)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_lightweight_alerts")
+
+    def _subscribe(self, email_value):
+        async def scenario():
+            data = _Model(
+                email=email_value, search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            return await self.routes_alerts.subscribe_alert(data)
+        return _run(scenario())
+
+    def test_second_subscribe_reuses_lightweight_no_500(self):
+        # First subscribe → creates a lightweight account
+        r1 = self._subscribe("foo@example.com")
+        assert r1["success"] is True
+        assert r1["created_account"] is True
+        # Verify it was stored lightweight (hashed_password None)
+        users = [d for d in self.db.users._docs]
+        assert len(users) == 1
+        assert users[0]["hashed_password"] is None
+        assert users[0]["_id"].startswith("user_")
+
+        # Second subscribe with a variant → reuse, created_account=False, no 500
+        r2 = self._subscribe(" Foo@Example.COM ")
+        assert r2["success"] is True
+        assert r2["created_account"] is False
+        # Still exactly one user (no duplicate)
+        assert len([d for d in self.db.users._docs]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 34. P0-009 BUILD CORRECTION: XML partner login-less detected without crash  #
+# --------------------------------------------------------------------------- #
+class TestXMLPartnerLoginlessLookup:
+    """(c) A login-less XML partner (hashed_password=None, last_name=None) is
+    detected by the tolerant doc lookup without raising ValidationError."""
+
+    def test_xml_partner_doc_lookup_no_validation_error(self, monkeypatch):
+        import email_utils as _eu
+        db = _FakeDB(users=[
+            {"_id": "partner_feed_1", "email": "feed@partenaire.joboolo",
+             "first_name": "Acme", "last_name": None,
+             "user_type": "partner", "hashed_password": None,  # login-less
+             "is_active": True, "is_verified": True,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+        ])
+        db_ref = db
+
+        async def _get_db():
+            return db_ref
+
+        monkeypatch.setattr(_eu, "get_database", _get_db)
+        from email_utils import lookup_user_doc_by_email
+        doc = _run(lookup_user_doc_by_email("feed@partenaire.joboolo"))
+        assert doc is not None
+        assert doc["_id"] == "partner_feed_1"
+        assert doc["hashed_password"] is None
+        assert doc["last_name"] is None
+
+    def test_xml_partner_admin_duplicate_rejected(self, monkeypatch):
+        """admin create partner must not crash / must reject when an XML
+        login-less partner with the same canonical email already exists."""
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB(users=[
+            {"_id": "partner_feed_1", "email": " feed@partenaire.joboolo ",
+             "first_name": "Acme", "last_name": None,
+             "user_type": "partner", "hashed_password": None,
+             "is_active": True, "is_verified": True,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+        ])
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        routes_admin = _load(monkeypatch, "routes/admin.py", "p009_lightweight_admin")
+
+        async def scenario():
+            data = _Model(
+                email="feed@partenaire.joboolo", password="x",
+                first_name="New", last_name="Partner",
+                company_name="Acme", billing_mode="per_click",
+                default_cpc=0.0, posting_price=0.0,
+                xml_feed_url=None,
+            )
+            await routes_admin.create_partner(data, admin=None)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# 35. P0-009 BUILD CORRECTION: create_admin legacy ObjectId / fields          #
+# --------------------------------------------------------------------------- #
+class TestCreateAdminLegacyObjectId:
+    """(d) create_admin with legacy _id ObjectId / legacy fields does not
+    create a duplicate and does not crash."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        self.admin = _load(
+            monkeypatch, "scripts/create_admin.py", "p009_create_admin_objid")
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        def _get_password_hash(p):
+            return "HASH(" + p + ")"
+
+        auth = types.ModuleType("auth")
+        auth.get_password_hash = _get_password_hash
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+    def test_legacy_objectid_admin_does_not_duplicate(self):
+        """Legacy admin with ObjectId _id and legacy fields is found via the
+        tolerant doc lookup → 'exists', no duplicate creation, no crash."""
+        self.db.users._docs.append({
+            "_id": "507f1f77bcf86cd799439011",  # Mongo ObjectId as string
+            "email": " Admin@Example.COM ",
+            "user_type": "admin", "hashed_password": "h", "is_active": True,
+            "first_name": "Legacy", "last_name": "Admin",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": True,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+        result = _run(self.admin._ensure_admin("admin@example.com", "secret"))
+        assert result == "exists"
+        assert len(self.db.users._docs) == 1  # no duplicate created
+
+
+# --------------------------------------------------------------------------- #
+# 36. P0-009 BUILD CORRECTION: JWT lookup errors => 503 (fail-closed)        #
+# --------------------------------------------------------------------------- #
+class TestJWTLookupErrorsYield503:
+    """(e) auth.get_current_user() must translate LookupAggregationError /
+    LookupCollisionError into a controlled 503, never a raw HTTP 500."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        import auth as _auth_mod
+        self.auth = _auth_mod
+
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        monkeypatch.setattr(_auth_mod, "get_secret_key", lambda: "test-secret-key")
+        monkeypatch.setattr(_auth_mod, "get_user_by_email", None)
+
+        self.decode_outcome = {"payload": {"sub": "user@example.com"}}
+
+        def _fake_decode(token, key, algorithms=None):
+            return self.decode_outcome["payload"]
+
+        monkeypatch.setattr(_auth_mod.jwt, "decode", _fake_decode)
+
+    def _creds(self):
+        return types.SimpleNamespace(credentials="some.token.value")
+
+    def test_lookup_aggregation_error_returns_503(self, monkeypatch):
+        """LookupAggregationError in get_current_user => 503, not 500."""
+        import email_utils as _eu
+        from email_utils import LookupAggregationError
+
+        async def _raise_agg(email):
+            raise LookupAggregationError("aggregation unavailable")
+
+        monkeypatch.setattr(_eu, "lookup_user_doc_by_email", _raise_agg)
+        import fastapi
+        with pytest.raises(fastapi.HTTPException) as exc:
+            _run(self.auth.get_current_user(self._creds()))
+        assert exc.value.status_code == 503
+
+    def test_lookup_collision_error_returns_503(self, monkeypatch):
+        """LookupCollisionError in get_current_user => 503, not 500."""
+        import email_utils as _eu
+        from email_utils import LookupCollisionError
+
+        async def _raise_coll(email):
+            raise LookupCollisionError("collision")
+
+        monkeypatch.setattr(_eu, "lookup_user_doc_by_email", _raise_coll)
+        import fastapi
+        with pytest.raises(fastapi.HTTPException) as exc:
+            _run(self.auth.get_current_user(self._creds()))
+        assert exc.value.status_code == 503
+
+    def test_unknown_email_returns_401(self, monkeypatch):
+        """No matching email => 401 (credentials exception), not 503."""
+        import email_utils as _eu
+
+        async def _no_match(email):
+            return None
+
+        monkeypatch.setattr(_eu, "lookup_user_doc_by_email", _no_match)
+        import fastapi
+        with pytest.raises(fastapi.HTTPException) as exc:
+            _run(self.auth.get_current_user(self._creds()))
+        assert exc.value.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# 37. P0-009 BUILD CORRECTION: Google reuse lightweight same _id              #
+# --------------------------------------------------------------------------- #
+class TestGoogleReuseLightweightAccount:
+    """(b) On a lightweight alert account, Google with the same email must
+    reuse STRICTLY the same _id, produce a valid response, and create no
+    duplicate"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        # httpx stub returning a Google session
+        httpx = types.ModuleType("httpx")
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"email": " foo@example.com ", "name": "Foo User"}
+
+        class _MockClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, *a, **k):
+                return _Resp()
+
+        httpx.AsyncClient = lambda *a, **k: _MockClient()
+        httpx.HTTPError = Exception
+        monkeypatch.setitem(sys.modules, "httpx", httpx)
+
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_google_reuse")
+
+    def test_google_reuses_lightweight_same_id_no_duplicate(self):
+        # Seed a lightweight alert account
+        self.db.users._docs.append({
+            "_id": "user_alert_123", "email": " foo@example.com ",
+            "hashed_password": None, "first_name": None, "last_name": None,
+            "user_type": "candidate", "is_active": True, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+        initial_ids = [d["_id"] for d in self.db.users._docs]
+        assert len(self.db.users._docs) == 1
+
+        async def scenario():
+            return await self.routes_auth.google_session(_Model(session_id="sess_1"))
+
+        result = _run(scenario())
+        # Valid response with same _id (UserResponse stores it under 'id')
+        assert result.user.__dict__.get("id") == "user_alert_123"
+        # No duplicate account created
+        assert len(self.db.users._docs) == 1
+        ids = [d["_id"] for d in self.db.users._docs]
+        assert ids == initial_ids  # same _id strictly reused

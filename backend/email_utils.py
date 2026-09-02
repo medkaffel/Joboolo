@@ -5,14 +5,17 @@ normalisation email dans le domaine identité/auth.  Tous les chemins
 d'entrée (register, login, OAuth, admin, seed, alert) DOIVENT passer
 par cette fonction.
 
-``lookup_user_by_email`` effectue une recherche transitionnelle qui
-sérialise ``strip() + lower()`` via une aggregation Mongo
-(``$trim`` + ``$toLower``), permettant de détecter les doublons
-latents avant migration complète.
+Fournit deux fonctions de lookup transitionnel :
+  - ``lookup_user_doc_by_email`` — retourne le document brut ``dict``
+    (tolérant aux enregistrements incomplets : ``first_name=None``,
+    ``hashed_password=None``, etc.).  À utiliser pour les chemins
+    create/reuse qui manipulent des comptes lightweight.
+  - ``lookup_user_by_email`` — wrapper qui construit un ``User``
+    strict.  Ne convient que si le document est garanti complet.
 
 Typologie des résultats (fail-closed) :
   - ``None``                 → aucun compte ne correspond (email libre).
-  - ``User``                 → exactement un compte canonique trouvé.
+  - ``dict`` / ``User``      → exactement un compte canonique trouvé.
   - ``LookupAggregationError`` → l'agrégation Mongo a échoué (ancien
     serveur, timeout, réseau…).  Les create-paths DOIVENT refuser
     toute création.
@@ -74,8 +77,16 @@ def canonical_email(email: str | None) -> str:
 # Transition lookup — Mongo aggregation equivalent to strip+lower
 # ---------------------------------------------------------------------------
 
-async def lookup_user_by_email(email: str) -> Optional[User]:
-    """Look up a user by email using a transitionnal canonical query.
+async def lookup_user_doc_by_email(email: str) -> Optional[dict]:
+    """Look up a **raw** user document by email (transitionnal canonical query).
+
+    Unlike :func:`lookup_user_by_email` which constructs a ``User`` pydantic
+    model (requiring all fields to be valid), this function returns the raw
+    MongoDB document.  This is necessary for code-paths that deal with
+    incomplete / lightweight accounts (e.g. ``/alerts/subscribe`` with
+    ``hashed_password=None``, ``first_name=None``; OAuth lightweight; XML
+    login-less partners) where constructing a strict ``User`` would raise
+    a ``ValidationError``.
 
     The aggregation pipeline computes the canonical form server-side
     (``$trim`` + ``$toLower``) so that legacy non-canonical values are
@@ -84,7 +95,7 @@ async def lookup_user_by_email(email: str) -> Optional[User]:
 
     Returns:
         * ``None`` — no matching user (email is free)
-        * ``User`` — exactly one canonical match
+        * ``dict`` — exactly one raw document matching the canonical email
 
     Raises:
         * ``LookupAggregationError`` — Mongo aggregation failed (infra).
@@ -140,4 +151,31 @@ async def lookup_user_by_email(email: str) -> Optional[User]:
             f"{len(results)} users share canonical email {canonical!r}"
         )
 
-    return User(**results[0])
+    return results[0]
+
+
+async def lookup_user_by_email(email: str) -> Optional[User]:
+    """Look up a user by email using a transitionnal canonical query.
+
+    Thin wrapper over :func:`lookup_user_doc_by_email` that constructs a
+    strict ``User`` model.  Callers that deal with potentially incomplete
+    documents (lightweight accounts, OAuth, XML partners) SHOULD use
+    :func:`lookup_user_doc_by_email` instead to avoid ``ValidationError``
+    on records where ``first_name``, ``last_name`` or ``hashed_password``
+    are ``None``.
+
+    Returns:
+        * ``None`` — no matching user (email is free)
+        * ``User`` — exactly one canonical match
+
+    Raises:
+        * ``LookupAggregationError`` — Mongo aggregation failed (infra).
+          Create-paths MUST refuse creation.
+        * ``LookupCollisionError`` — ≥ 2 users share the same canonical
+          email.  Create-paths MUST refuse creation and MUST NOT silently
+          merge.
+    """
+    doc = await lookup_user_doc_by_email(email)
+    if doc is None:
+        return None
+    return User(**doc)

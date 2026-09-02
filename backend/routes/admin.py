@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from database import get_database
 from auth import require_admin, get_password_hash, get_user_by_email
-from email_utils import canonical_email, lookup_user_by_email, LookupAggregationError, LookupCollisionError
+from email_utils import canonical_email, lookup_user_doc_by_email, LookupAggregationError, LookupCollisionError
 from models import (
     User, AdminUserUpdate, PartnerCreate, PartnerConfigUpdate, PartnerBillingMode
 )
@@ -187,7 +187,7 @@ async def create_partner(data: PartnerCreate, admin: User = Depends(require_admi
     # P0-009: canonicalize email
     email = canonical_email(data.email)
     try:
-        existing = await lookup_user_by_email(email)
+        existing = await lookup_user_doc_by_email(email)
     except (LookupAggregationError, LookupCollisionError):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -213,7 +213,7 @@ async def create_partner(data: PartnerCreate, admin: User = Depends(require_admi
         await db.users.insert_one(user_doc)
     except pymongo.errors.DuplicateKeyError:
         try:
-            existing = await lookup_user_by_email(email)
+            existing = await lookup_user_doc_by_email(email)
         except (LookupAggregationError, LookupCollisionError):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -357,7 +357,7 @@ async def create_xml_feed(data: XmlFeedCreate, admin: User = Depends(require_adm
         # P0-009: canonicalize email
         email = canonical_email(data.new_partner_email or f"feed-{uuid.uuid4().hex[:8]}@partenaire.joboolo")
         try:
-            existing = await lookup_user_by_email(email)
+            existing = await lookup_user_doc_by_email(email)
         except (LookupAggregationError, LookupCollisionError):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -374,7 +374,7 @@ async def create_xml_feed(data: XmlFeedCreate, admin: User = Depends(require_adm
             })
         except pymongo.errors.DuplicateKeyError:
             try:
-                existing = await lookup_user_by_email(email)
+                existing = await lookup_user_doc_by_email(email)
             except (LookupAggregationError, LookupCollisionError):
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
