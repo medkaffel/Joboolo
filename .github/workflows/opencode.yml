@@ -99,9 +99,9 @@ jobs:
             if [ "$MODE" = "plan" ]; then
               echo "MODE: PLAN ONLY. Read and analyze the repository. Do not modify files, commit, push, or create a PR. Return a concrete implementation plan and blockers."
             elif [ "$IS_PR" = "true" ]; then
-              echo "MODE: BUILD CORRECTION ON EXISTING PR. The workflow checks out the PR head branch. Apply only the requested corrections, update/add tests, and leave the working tree ready to commit. Do not create another branch or PR and do not push yourself. Stay inside the repository; do not inspect /etc, install system packages, or start external services. If real-service validation is requested, implement the tests/workflow support and let CI/ChatGPT run that validation separately."
+              echo "MODE: BUILD CORRECTION ON EXISTING PR. The workflow checks out the PR head branch. Apply only the requested corrections, update/add tests, and leave the working tree ready to commit. Do not create, checkout, switch, rename, pull, or push Git branches; do not commit yourself; the workflow owns all Git branch/commit/push operations. Stay inside the repository; do not inspect /etc, install system packages, or start external services. If real-service validation is requested, implement the tests/workflow support and let CI/ChatGPT run that validation separately."
             else
-              echo "MODE: BUILD. Implement only the requested issue scope, add/update tests, and leave the working tree with the requested changes. Do not push or create a PR yourself; the workflow handles the branch and ChatGPT creates/reviews the PR. Stay inside the repository; do not inspect /etc or install system packages."
+              echo "MODE: BUILD. Implement only the requested issue scope, add/update tests, and leave the working tree with the requested changes. Do not create, checkout, switch, rename, pull, or push Git branches; do not commit yourself; the workflow owns all Git branch/commit/push operations and ChatGPT creates/reviews the PR. Stay inside the repository; do not inspect /etc or install system packages."
             fi
           } > /tmp/opencode-prompt.txt
 
@@ -181,13 +181,23 @@ jobs:
             exit 0
           fi
 
+          # OpenCode must not change branches, but publish the current working HEAD
+          # to the workflow-owned target branch even if an agent disobeys that rule.
           git add -A
           if [ "${{ steps.context.outputs.is_pr }}" = "true" ]; then
             git commit -m "fix: update PR #${{ steps.context.outputs.issue_number }} via OpenCode"
           else
             git commit -m "fix: issue #${{ steps.context.outputs.issue_number }} via OpenCode"
           fi
-          git push --set-upstream origin "$BRANCH"
+
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          REMOTE_SHA="$(git ls-remote origin "refs/heads/$BRANCH" | awk '{print $1}')"
+          if [ -z "$REMOTE_SHA" ] || [ "$REMOTE_SHA" != "$COMMIT_SHA" ]; then
+            echo "Published branch verification failed: local=$COMMIT_SHA remote=${REMOTE_SHA:-MISSING} branch=$BRANCH" >&2
+            exit 1
+          fi
+          echo "PUSHED_SHA=$COMMIT_SHA" >> "$GITHUB_ENV"
 
           if [ "${{ steps.context.outputs.is_pr }}" = "true" ]; then
             cat /tmp/opencode-output.txt
@@ -237,7 +247,11 @@ jobs:
             BRANCH_VALUE="UNKNOWN"
           fi
 
-          SHA_VALUE="$(git rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
+          if [ -n "${PUSHED_SHA:-}" ]; then
+            SHA_VALUE="$PUSHED_SHA"
+          else
+            SHA_VALUE="$(git rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
+          fi
 
           FILES_CHANGED_VALUE="NONE"
           if [ -n "${START_SHA:-}" ] && git rev-parse --verify "$START_SHA" >/dev/null 2>&1; then
@@ -254,7 +268,7 @@ jobs:
           if [ -f /tmp/opencode-output.txt ]; then
             EXACT_TESTS="$(grep -E '^TESTS=' /tmp/opencode-output.txt | tail -1 | sed 's/^TESTS=//' || true)"
             if [ -n "$EXACT_TESTS" ]; then
-              TESTS_VALUE="$EXACT_TESTS"
+              TESTS_VALUE="$(printf '%s' "$EXACT_TESTS" | cut -c1-500)"
             else
               HEURISTIC_TESTS="$(grep -Ei '[0-9]+.*(passed|failed|skipped|tests? pass|tests? fail)' /tmp/opencode-output.txt | tail -1 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-500 || true)"
               if [ -n "$HEURISTIC_TESTS" ]; then
