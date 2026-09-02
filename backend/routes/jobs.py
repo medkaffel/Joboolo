@@ -303,6 +303,9 @@ async def create_job(
     
     is_premium = bool(getattr(job_data, "is_premium", False))
 
+    # P0-010: geocode location BEFORE any Mongo write / transaction
+    center = await geocode_place(job_data.location)
+
     # Create job document
     job_doc = {
         "_id": f"job_{datetime.utcnow().timestamp()}",
@@ -316,6 +319,8 @@ async def create_job(
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow()
     }
+    if center:
+        job_doc["loc"] = {"type": "Point", "coordinates": center}
     if is_premium:
         # P0-005 : la publication Premium consomme exactement 1 crédit recruteur.
         # Consommation et insertion sont atomiques dans une transaction Mongo
@@ -384,13 +389,30 @@ async def update_job(
             detail="Job not found or you don't have permission to edit it"
         )
     
-    # Update job
+    # P0-010: handle location change with geocoding
     update_data = {k: v for k, v in job_data.dict().items() if v is not None}
-    update_data["updated_at"] = datetime.utcnow()
+    new_location = update_data.get("location")
+    old_location = job.get("location")
+    loc_changed = new_location is not None and new_location != old_location
+    
+    if loc_changed:
+        center = await geocode_place(new_location)
+        if center:
+            update_data["loc"] = {"type": "Point", "coordinates": center}
+        else:
+            update_data["loc"] = None  # marker for $unset
+    
+    # Build mongo update with $set and conditional $unset for loc
+    # Always include updated_at for manual updates
+    set_data = {k: v for k, v in update_data.items() if v is not None}
+    set_data["updated_at"] = datetime.utcnow()
+    mongo_update = {"$set": set_data}
+    if loc_changed and update_data.get("loc") is None:
+        mongo_update["$unset"] = {"loc": ""}
     
     await db.jobs.update_one(
         {"_id": job_id},
-        {"$set": update_data}
+        mongo_update
     )
     
     # Get updated job
