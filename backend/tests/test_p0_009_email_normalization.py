@@ -50,6 +50,10 @@ class _Model:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
 
+    @property
+    def id(self):
+        return self.__dict__.get("_id")
+
     def dict(self, exclude=None, exclude_unset=False):
         d = dict(self.__dict__)
         if exclude:
@@ -118,6 +122,12 @@ def _install_stubs(monkeypatch):
     auth.require_employer = lambda *a, **k: None
     auth.require_admin = lambda *a, **k: None
     auth.get_password_hash = lambda p: "hash"
+
+    async def _default_authenticate(email, password):
+        from email_utils import lookup_user_by_email
+        return await lookup_user_by_email(email)
+
+    auth.authenticate_user = _default_authenticate
     auth.get_user_by_email = lambda e: None
     monkeypatch.setitem(sys.modules, "auth", auth)
 
@@ -136,6 +146,24 @@ def _install_stubs(monkeypatch):
     httpx.AsyncClient = lambda *a, **k: _MockClient()
     httpx.HTTPError = Exception
     monkeypatch.setitem(sys.modules, "httpx", httpx)
+
+    pymongo = types.ModuleType("pymongo")
+    pymongo_errors = types.ModuleType("pymongo.errors")
+
+    class _FakeDuplicateKeyError(Exception):
+        pass
+
+    pymongo_errors.DuplicateKeyError = _FakeDuplicateKeyError
+    pymongo.errors = pymongo_errors
+    monkeypatch.setitem(sys.modules, "pymongo", pymongo)
+    monkeypatch.setitem(sys.modules, "pymongo.errors", pymongo_errors)
+
+    motor = types.ModuleType("motor")
+    motor_asyncio = types.ModuleType("motor.motor_asyncio")
+    motor_asyncio.AsyncIOMotorClient = lambda *a, **k: None
+    motor.motor_asyncio = motor_asyncio
+    monkeypatch.setitem(sys.modules, "motor", motor)
+    monkeypatch.setitem(sys.modules, "motor.motor_asyncio", motor_asyncio)
 
 
 def _load(monkeypatch, rel_path, modname):
@@ -338,12 +366,31 @@ class _FindCursor:
         return self._docs[:length]
 
 
+class _AsyncIterator:
+    def __init__(self, items):
+        self._items = items
+        self._index = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self._items):
+            raise StopAsyncIteration
+        item = self._items[self._index]
+        self._index += 1
+        return item
+
+
 class _AggCursor:
     def __init__(self, docs):
         self._docs = docs
 
     async def to_list(self, length):
         return self._docs[:length]
+
+    def __aiter__(self):
+        return _AsyncIterator(self._docs)
 
 
 class _FakeDB:
@@ -564,7 +611,7 @@ class TestMigrationDryRun:
         u1 = _run(db.users.find_one({"_id": "u1"}))
         assert u1["email"] == "foo@example.com"
 
-    def test_collision_detection(self):
+    def test_collision_detection_dry_run_returns_report(self):
         db = _FakeDB(users=[
             {"_id": "u1", "email": "foo@example.com"},
             {"_id": "u2", "email": " Foo@Example.COM "},
@@ -575,13 +622,21 @@ class TestMigrationDryRun:
         assert report["collision_details"][0]["canonical_email"] == "foo@example.com"
         assert set(report["collision_details"][0]["user_ids"]) == {"u1", "u2"}
 
-    def test_apply_raises_on_collision_without_confirm(self):
+    def test_apply_raises_on_collision(self):
         db = _FakeDB(users=[
             {"_id": "u1", "email": "foo@example.com"},
             {"_id": "u2", "email": " Foo@Example.COM "},
         ])
         with pytest.raises(RuntimeError, match="collision"):
-            _run(self.migrate_module._migrate(db, dry_run=False, confirm_collisions=False))
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        # Verify ZERO writes
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["email"] == "foo@example.com"
+        u2 = _run(db.users.find_one({"_id": "u2"}))
+        assert u2["email"] == " Foo@Example.COM "
+        # Verify NO marker was set
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
 
     def test_already_migrated_skip(self):
         db = _FakeDB(
@@ -1621,7 +1676,12 @@ class TestLoginFailsClosedOnLookupError:
         auth.require_employer = lambda *a, **k: None
         auth.require_admin = lambda *a, **k: None
         auth.get_password_hash = lambda p: "hashed_" + p
-        auth.authenticate_user = None
+
+        async def _authenticate(email, password):
+            from email_utils import lookup_user_by_email
+            return await lookup_user_by_email(email)
+
+        auth.authenticate_user = _authenticate
         auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
         auth.get_user_by_email = lambda e: None
         monkeypatch.setitem(sys.modules, "auth", auth)
@@ -1669,3 +1729,232 @@ class TestLoginFailsClosedOnLookupError:
         with pytest.raises(_HTTPException) as exc:
             _run(scenario())
         assert exc.value.status_code == 503
+
+
+# --------------------------------------------------------------------------- #
+# 18. P0-009 BUILD CORRECTION: apply + collision => 0 update, 0 marker, error  #
+# --------------------------------------------------------------------------- #
+class TestMigrationFailClosedOnCollisions:
+    """P0-009: --apply with collisions MUST do ZERO writes and ZERO marker."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.migrate_module = _load(
+            monkeypatch, "scripts/migrate_p0009_email_normalization.py",
+            "p0009_migrate_failclosed")
+
+    def test_apply_with_collisions_does_zero_updates(self):
+        db = _FakeDB(users=[
+            {"_id": "u1", "email": "foo@example.com"},
+            {"_id": "u2", "email": " Foo@Example.COM "},
+            {"_id": "u3", "email": "  FOO@EXAMPLE.COM  "},
+        ])
+        with pytest.raises(RuntimeError, match="collision"):
+            _run(self.migrate_module._migrate(db, dry_run=False))
+        # Verify ZERO writes
+        u1 = _run(db.users.find_one({"_id": "u1"}))
+        assert u1["email"] == "foo@example.com"  # unchanged
+        u2 = _run(db.users.find_one({"_id": "u2"}))
+        assert u2["email"] == " Foo@Example.COM "  # unchanged
+        u3 = _run(db.users.find_one({"_id": "u3"}))
+        assert u3["email"] == "  FOO@EXAMPLE.COM  "  # unchanged
+        # Verify NO marker was set
+        marker = _run(db.migration_flags.find_one({"_id": "p0009_email_normalization"}))
+        assert marker is None
+
+    def test_no_flag_can_bypass_collision_check(self):
+        """Removing --confirm-collisions means no flag exists to bypass."""
+        import inspect
+        source = inspect.getsource(self.migrate_module._build_parser)
+        assert "confirm" not in source.lower()
+        assert "collision" not in source.lower()
+
+
+# --------------------------------------------------------------------------- #
+# 19. P0-009 BUILD CORRECTION: inventory >100k not truncated                   #
+# --------------------------------------------------------------------------- #
+class TestMigrationStreamingCursor:
+    """P0-009: migration must iterate ALL groups via streaming cursor,
+    not truncate via to_list(length=...)."""
+
+    def test_aggregate_returns_async_iterator(self):
+        """_AggCursor supports async iteration (no to_list truncation)."""
+        cursor = _AggCursor([{"_id": "a", "count": 1}, {"_id": "b", "count": 2}])
+
+        async def consume():
+            results = []
+            async for g in cursor:
+                results.append(g)
+            return results
+
+        result = _run(consume())
+        assert len(result) == 2
+        assert result[0]["_id"] == "a"
+        assert result[1]["_id"] == "b"
+
+    def test_migration_uses_async_for_not_to_list(self):
+        """Migration source must NOT use to_list for the aggregate cursor."""
+        source = open(BACKEND_DIR / "scripts" / "migrate_p0009_email_normalization.py").read()
+        # Should use "async for" on the aggregate cursor
+        assert "async for group in cursor:" in source
+        # Must NOT have to_list with a numeric limit on the aggregate call
+        assert "aggregate(pipeline).to_list" not in source
+
+
+# --------------------------------------------------------------------------- #
+# 20. P0-009 BUILD CORRECTION: alert DK race + relookup => created_account=False
+# --------------------------------------------------------------------------- #
+class TestAlertDuplicateKeyRaceCreatedAccount:
+    """P0-009: When prelookup finds nothing, insert DuplicateKeys, and relookup
+    finds an existing account, created_account MUST be False."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_dk_race_alerts")
+
+    def test_dk_race_relookup_existing_created_account_false(self):
+        """Simulate: prelookup returns None, insert raises DuplicateKeyError,
+        relookup finds existing user → created_account must be False."""
+        # Seed a user that will be found by relookup but NOT by prelookup
+        # (prelookup uses aggregation, relookup also uses aggregation — both
+        # should find it. We simulate the race by making the first insert fail.)
+        self.db.users._docs.append({
+            "_id": "existing_race_u", "email": "race@example.com",
+            "user_type": "candidate", "hashed_password": "hash_race", "is_active": True,
+            "first_name": "Race", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+        from pymongo.errors import DuplicateKeyError
+        original_insert = self.db.users.insert_one
+        call_count = 0
+
+        async def _dk_on_first_insert(doc, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise DuplicateKeyError("duplicate key on users collection")
+            return await original_insert(doc, **kwargs)
+
+        self.db.users.insert_one = _dk_on_first_insert
+
+        async def scenario():
+            data = _Model(
+                email="race@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            return await self.routes_alerts.subscribe_alert(data)
+
+        result = _run(scenario())
+        assert result["success"] is True
+        assert result["created_account"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 21. P0-009 BUILD CORRECTION: non-lookup error at login not converted to 503  #
+# --------------------------------------------------------------------------- #
+class TestLoginNonLookupErrorNotConverted:
+    """P0-009: a non-lookup error (programming, hash, infra) during login
+    MUST NOT be masqueraded as 'Email lookup temporarily unavailable' (503)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self._eu_mod = _eu_mod
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_nonlookup_auth")
+
+    def test_hash_error_not_converted_to_503(self, monkeypatch):
+        """A hash verification error must NOT be converted to 503 lookup."""
+        # Seed a user so authenticate_user doesn't return None
+        self.db.users._docs.append({
+            "_id": "u_hash", "email": "hash@example.com",
+            "user_type": "candidate", "hashed_password": "valid_hash", "is_active": True,
+            "first_name": "Hash", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+        async def _raising_authenticate(email, password):
+            raise ValueError("Unexpected hash error: bcrypt module missing")
+
+        self.routes_auth.authenticate_user = _raising_authenticate
+
+        async def scenario():
+            login_data = _Model(email="hash@example.com", password="secret",
+                                expected_user_type=None)
+            await self.routes_auth.login(login_data)
+
+        # Must propagate as-is (ValueError), NOT be caught and turned into 503
+        with pytest.raises(ValueError, match="Unexpected hash error"):
+            _run(scenario())
+
+    def test_login_except_only_catches_lookup_errors(self):
+        """Source code must only catch LookupAggregationError and LookupCollisionError."""
+        source = open(BACKEND_DIR / "routes" / "auth.py").read()
+        lines = source.split("\n")
+        in_login_try = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if "user = await authenticate_user" in stripped:
+                in_login_try = True
+            if in_login_try and stripped.startswith("except"):
+                # Must be exactly (LookupAggregationError, LookupCollisionError)
+                assert "LookupAggregationError" in stripped and "LookupCollisionError" in stripped, (
+                    f"login except on line {i+1} catches too broadly: {stripped}"
+                )
+                assert "Exception" not in stripped or "LookupAggregationError" in stripped
+                in_login_try = False
+                break

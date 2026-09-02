@@ -240,7 +240,7 @@ async def login(login_data: LoginRequest):
     """Login user"""
     try:
         user = await authenticate_user(login_data.email, login_data.password)
-    except Exception:
+    except (LookupAggregationError, LookupCollisionError):
         # P0-009: LookupAggregationError / LookupCollisionError from
         # authenticate_user → fail closed, do not silently select/create account
         raise HTTPException(

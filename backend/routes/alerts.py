@@ -42,6 +42,8 @@ async def subscribe_alert(data: AlertSubscribe):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Email lookup temporarily unavailable, please retry"
         )
+
+    created_account = False
     if existing_user:
         user_id = existing_user.id
     else:
@@ -61,6 +63,7 @@ async def subscribe_alert(data: AlertSubscribe):
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow(),
             })
+            created_account = True
         except pymongo.errors.DuplicateKeyError:
             # P0-009: DuplicateKeyError race — re-lookup
             try:
@@ -72,6 +75,7 @@ async def subscribe_alert(data: AlertSubscribe):
                 )
             if existing:
                 user_id = existing.id
+                created_account = False
             else:
                 raise HTTPException(status_code=409, detail="Collision d'email lors de la création du compte")
 
@@ -96,7 +100,7 @@ async def subscribe_alert(data: AlertSubscribe):
         "updated_at": datetime.utcnow(),
     }
     await db.alerts.insert_one(alert_doc)
-    return {"success": True, "alert_id": alert_doc["_id"], "created_account": not bool(existing_user)}
+    return {"success": True, "alert_id": alert_doc["_id"], "created_account": created_account}
 
 
 @router.get("/track/{alert_id}")

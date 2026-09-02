@@ -12,8 +12,9 @@ Sûreté:
 - Ne crée PAS / supprime PAS d'index ``users.email`` existant.
 - Marqueur ``p0009_email_normalization`` posé APRES la vérification et
   l'application complète.
-- Mode ``--apply`` avec ``--confirm-collisions`` pour traiter les
-  collisions (fail-safe, mais avec confirmation explicite).
+- Aucun flag ne peut bypasser le fail-closed sur collisions.
+- L'inventaire couvre TOUS les users via un curseur streaming (pas de
+  troncation).
 
 Usage:
     # Dry-run (défaut)
@@ -21,9 +22,6 @@ Usage:
 
     # Apply (normale les emails non-canoniques)
     python scripts/migrate_p0009_email_normalization.py --apply
-
-    # Apply avec collision handling (exige --confirm-collisions)
-    python scripts/migrate_p0009_email_normalization.py --apply --confirm-collisions
 """
 import argparse
 import asyncio
@@ -45,13 +43,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="P0-009 email normalization migration")
     p.add_argument("--apply", action="store_true", default=False,
                    help="Apply changes (dry-run by default)")
-    p.add_argument("--confirm-collisions", action="store_true", default=False,
-                   help="Required with --apply when collisions exist")
     return p
 
 
-async def _migrate(db, *, dry_run: bool = True, confirm_collisions: bool = False) -> dict:
+async def _migrate(db, *, dry_run: bool = True) -> dict:
     """Run the migration. Returns a report dict."""
+    import datetime as _dt
+
     report = {
         "dry_run": dry_run,
         "total_users": 0,
@@ -71,7 +69,8 @@ async def _migrate(db, *, dry_run: bool = True, confirm_collisions: bool = False
         logger.info("Already migrated (marker present).")
         return report
 
-    # Aggregate: group by canonical email to detect collisions
+    # Aggregate: group by canonical email to detect collisions.
+    # Use a streaming cursor (no to_list truncation) to cover ALL users.
     pipeline = [
         {"$match": {"email": {"$type": "string"}}},
         {
@@ -91,20 +90,19 @@ async def _migrate(db, *, dry_run: bool = True, confirm_collisions: bool = False
         },
     ]
 
-    groups = await db.users.aggregate(pipeline).to_list(length=100000)
-    report["total_users"] = sum(g["count"] for g in groups)
-
+    cursor = db.users.aggregate(pipeline)
     to_update = []
     collisions = []
 
-    for group in groups:
+    async for group in cursor:
         canonical = group["_id"]
         count = group["count"]
         ids = group["ids"]
         emails = group["emails"]
 
+        report["total_users"] += count
+
         if count > 1:
-            # Collision: multiple users with same canonical email
             collisions.append({
                 "canonical_email": canonical,
                 "count": count,
@@ -128,10 +126,11 @@ async def _migrate(db, *, dry_run: bool = True, confirm_collisions: bool = False
     report["collisions"] = len(collisions)
     report["collision_details"] = collisions
 
-    if collisions and not confirm_collisions:
+    # Fail-closed: ANY collision means ZERO writes and ZERO marker.
+    if collisions:
         logger.error(
             "COLLISIONS DETECTED: %d groups share canonical emails. "
-            "Use --confirm-collisions to proceed with --apply, or resolve manually.",
+            "Resolve manually then relaunch.",
             len(collisions),
         )
         for c in collisions:
@@ -142,14 +141,14 @@ async def _migrate(db, *, dry_run: bool = True, confirm_collisions: bool = False
         if not dry_run:
             raise RuntimeError(
                 f"{len(collisions)} collision(s) detected. "
-                "Resolve manually or use --confirm-collisions."
+                "Resolve manually then relaunch."
             )
         return report
 
     if dry_run:
         logger.info(
-            "DRY-RUN: would update %d users, %d already canonical, %d collisions.",
-            report["to_update"], report["already_canonical"], report["collisions"],
+            "DRY-RUN: would update %d users, %d already canonical.",
+            report["to_update"], report["already_canonical"],
         )
         return report
 
@@ -157,14 +156,14 @@ async def _migrate(db, *, dry_run: bool = True, confirm_collisions: bool = False
     for item in to_update:
         await db.users.update_one(
             {"_id": item["_id"]},
-            {"$set": {"email": item["new_email"], "updated_at": __import__("datetime").datetime.utcnow()}}
+            {"$set": {"email": item["new_email"], "updated_at": _dt.datetime.utcnow()}}
         )
         report["updated"] += 1
 
     # Set marker
     await db.migration_flags.insert_one({
         "_id": P0009_MARKER,
-        "applied_at": __import__("datetime").datetime.utcnow(),
+        "applied_at": _dt.datetime.utcnow(),
         "report": {
             "total_users": report["total_users"],
             "updated": report["updated"],
@@ -175,8 +174,8 @@ async def _migrate(db, *, dry_run: bool = True, confirm_collisions: bool = False
     report["marker_set"] = True
 
     logger.info(
-        "Migration complete: %d updated, %d already canonical, %d collisions.",
-        report["updated"], report["already_canonical"], report["collisions"],
+        "Migration complete: %d updated, %d already canonical.",
+        report["updated"], report["already_canonical"],
     )
     return report
 
@@ -197,7 +196,6 @@ async def main():
         report = await _migrate(
             db,
             dry_run=not args.apply,
-            confirm_collisions=args.confirm_collisions,
         )
         print(f"\nReport: {report}")
     finally:
