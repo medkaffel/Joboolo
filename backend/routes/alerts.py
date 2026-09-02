@@ -1,12 +1,13 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
 from typing import List
 from models import (
     JobAlert, JobAlertCreate, JobAlertUpdate, JobAlertResponse, User
 )
 from database import get_database
 from auth import get_current_active_user
-from email_utils import canonical_email, lookup_user_by_email
+from email_utils import canonical_email, lookup_user_by_email, LookupAggregationError, LookupCollisionError
 from datetime import datetime
+import pymongo.errors
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -34,7 +35,13 @@ async def subscribe_alert(data: AlertSubscribe):
     email = canonical_email(data.email)
 
     # P0-009: transitionnal lookup — reuse legacy account if found
-    existing_user = await lookup_user_by_email(email)
+    try:
+        existing_user = await lookup_user_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
     if existing_user:
         user_id = existing_user.id
     else:
@@ -54,9 +61,15 @@ async def subscribe_alert(data: AlertSubscribe):
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow(),
             })
-        except Exception:
+        except pymongo.errors.DuplicateKeyError:
             # P0-009: DuplicateKeyError race — re-lookup
-            existing = await lookup_user_by_email(email)
+            try:
+                existing = await lookup_user_by_email(email)
+            except (LookupAggregationError, LookupCollisionError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Email lookup temporarily unavailable, please retry"
+                )
             if existing:
                 user_id = existing.id
             else:

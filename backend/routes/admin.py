@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, status
 from typing import List, Optional
 from datetime import datetime
 import uuid
@@ -8,10 +8,11 @@ from pydantic import BaseModel
 
 from database import get_database
 from auth import require_admin, get_password_hash, get_user_by_email
-from email_utils import canonical_email, lookup_user_by_email
+from email_utils import canonical_email, lookup_user_by_email, LookupAggregationError, LookupCollisionError
 from models import (
     User, AdminUserUpdate, PartnerCreate, PartnerConfigUpdate, PartnerBillingMode
 )
+import pymongo.errors
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -185,7 +186,14 @@ async def create_partner(data: PartnerCreate, admin: User = Depends(require_admi
     db = await get_database()
     # P0-009: canonicalize email
     email = canonical_email(data.email)
-    if await lookup_user_by_email(email):
+    try:
+        existing = await lookup_user_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+    if existing:
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
 
     user_id = f"partner_{uuid.uuid4()}"
@@ -203,8 +211,14 @@ async def create_partner(data: PartnerCreate, admin: User = Depends(require_admi
     }
     try:
         await db.users.insert_one(user_doc)
-    except Exception:
-        existing = await lookup_user_by_email(email)
+    except pymongo.errors.DuplicateKeyError:
+        try:
+            existing = await lookup_user_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
         if existing:
             raise HTTPException(status_code=400, detail="Email déjà utilisé")
         raise HTTPException(status_code=409, detail="Email déjà utilisé")
@@ -342,7 +356,14 @@ async def create_xml_feed(data: XmlFeedCreate, admin: User = Depends(require_adm
             raise HTTPException(status_code=400, detail="Nom du partenaire requis")
         # P0-009: canonicalize email
         email = canonical_email(data.new_partner_email or f"feed-{uuid.uuid4().hex[:8]}@partenaire.joboolo")
-        if await lookup_user_by_email(email):
+        try:
+            existing = await lookup_user_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
+        if existing:
             raise HTTPException(status_code=400, detail="Email déjà utilisé")
         partner_id = f"partner_{uuid.uuid4()}"
         try:
@@ -351,8 +372,14 @@ async def create_xml_feed(data: XmlFeedCreate, admin: User = Depends(require_adm
                 "user_type": "partner", "hashed_password": None,  # login-less
                 "is_active": True, "is_verified": True, "created_at": now, "updated_at": now,
             })
-        except Exception:
-            existing = await lookup_user_by_email(email)
+        except pymongo.errors.DuplicateKeyError:
+            try:
+                existing = await lookup_user_by_email(email)
+            except (LookupAggregationError, LookupCollisionError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Email lookup temporarily unavailable, please retry"
+                )
             if existing:
                 raise HTTPException(status_code=400, detail="Email déjà utilisé")
             raise HTTPException(status_code=409, detail="Email déjà utilisé")

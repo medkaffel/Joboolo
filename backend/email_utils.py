@@ -9,6 +9,15 @@ par cette fonction.
 sérialise ``strip() + lower()`` via une aggregation Mongo
 (``$trim`` + ``$toLower``), permettant de détecter les doublons
 latents avant migration complète.
+
+Typologie des résultats (fail-closed) :
+  - ``None``                 → aucun compte ne correspond (email libre).
+  - ``User``                 → exactement un compte canonique trouvé.
+  - ``LookupAggregationError`` → l'agrégation Mongo a échoué (ancien
+    serveur, timeout, réseau…).  Les create-paths DOIVENT refuser
+    toute création.
+  - ``LookupCollisionError``  → ≥ 2 comptes partagent le même email
+    canonique.  Les create-paths DOIVENT refuser toute création.
 """
 from __future__ import annotations
 
@@ -19,6 +28,24 @@ from database import get_database
 from models import User
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed typed exceptions
+# ---------------------------------------------------------------------------
+
+class LookupAggregationError(Exception):
+    """Raised when the Mongo aggregation pipeline fails (infra/version issue).
+
+    Create-paths MUST NOT create or reuse any account when this is raised.
+    """
+
+
+class LookupCollisionError(Exception):
+    """Raised when ≥ 2 users share the same canonical email.
+
+    Create-paths MUST NOT create or silently merge any account.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +83,21 @@ async def lookup_user_by_email(email: str) -> Optional[User]:
     ``$type`` to avoid false-positives on corrupted documents.
 
     Returns:
-        * ``None`` — no matching user
+        * ``None`` — no matching user (email is free)
         * ``User`` — exactly one canonical match
-    * Never* returns a user when more than one document is found —
-    instead logs a collision warning and returns ``None`` (fail-closed).
+
+    Raises:
+        * ``LookupAggregationError`` — Mongo aggregation failed (infra).
+          Create-paths MUST refuse creation.
+        * ``LookupCollisionError`` — ≥ 2 users share the same canonical
+          email.  Create-paths MUST refuse creation and MUST NOT silently
+          merge.
     """
     db = await get_database()
     if db is None:
-        return None
+        raise LookupAggregationError(
+            "Database unavailable — cannot perform transitionnal lookup"
+        )
 
     canonical = canonical_email(email)
 
@@ -88,9 +122,10 @@ async def lookup_user_by_email(email: str) -> Optional[User]:
     except Exception:
         # Fail closed: if aggregation is unavailable (e.g. old Mongo version
         # or network error) we cannot safely detect legacy duplicates.
-        # Returning None prevents silent collision bypass.
-        logger.error("P0-009: aggregation lookup failed — fail-closed (returning None)")
-        return None
+        logger.error("P0-009: aggregation lookup failed — raising LookupAggregationError")
+        raise LookupAggregationError(
+            "Aggregation pipeline failed — cannot determine email uniqueness"
+        )
 
     if not results:
         return None
@@ -98,9 +133,11 @@ async def lookup_user_by_email(email: str) -> Optional[User]:
     if len(results) > 1:
         logger.error(
             "P0-009 COLLISION: %d users share canonical email %r — "
-            "fail-closed, returning None",
+            "raising LookupCollisionError",
             len(results), canonical,
         )
-        return None
+        raise LookupCollisionError(
+            f"{len(results)} users share canonical email {canonical!r}"
+        )
 
     return User(**results[0])

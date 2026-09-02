@@ -7,10 +7,14 @@ from auth import (
     get_password_hash, authenticate_user, create_access_token,
     get_current_active_user
 )
-from email_utils import canonical_email, lookup_user_by_email
+from email_utils import (
+    canonical_email, lookup_user_by_email,
+    LookupAggregationError, LookupCollisionError,
+)
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import httpx
+import pymongo.errors
 
 EMERGENT_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
@@ -65,7 +69,15 @@ async def register(user_data: UserCreate):
     email = canonical_email(user_data.email)
     
     # P0-009: transitionnal lookup — catches legacy non-canonical duplicates
-    if await lookup_user_by_email(email):
+    try:
+        existing = await lookup_user_by_email(email)
+    except (LookupAggregationError, LookupCollisionError) as exc:
+        # Fail closed: cannot determine email uniqueness → refuse creation
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+    if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
@@ -89,9 +101,16 @@ async def register(user_data: UserCreate):
     # Insert user
     try:
         await db.users.insert_one(user_doc)
-    except Exception:
+    except pymongo.errors.DuplicateKeyError:
         # P0-009: DuplicateKeyError race — re-lookup transitionnally
-        existing = await lookup_user_by_email(email)
+        try:
+            existing = await lookup_user_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            # Fail closed: cannot verify uniqueness after race
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -139,7 +158,14 @@ async def register_partner(data: PartnerRegisterRequest):
 
     # P0-009: canonicalize email
     email = canonical_email(data.email)
-    if await lookup_user_by_email(email):
+    try:
+        existing = await lookup_user_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
+    if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email déjà utilisé")
 
     now = datetime.utcnow()
@@ -164,8 +190,14 @@ async def register_partner(data: PartnerRegisterRequest):
             "utm_campaign": data.utm_campaign,
             "created_at": now, "updated_at": now,
         })
-    except Exception:
-        existing = await lookup_user_by_email(email)
+    except pymongo.errors.DuplicateKeyError:
+        try:
+            existing = await lookup_user_by_email(email)
+        except (LookupAggregationError, LookupCollisionError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email lookup temporarily unavailable, please retry"
+            )
         if existing:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email déjà utilisé")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email déjà utilisé")
@@ -206,7 +238,15 @@ async def register_partner(data: PartnerRegisterRequest):
 @router.post("/login", response_model=LoginResponse)
 async def login(login_data: LoginRequest):
     """Login user"""
-    user = await authenticate_user(login_data.email, login_data.password)
+    try:
+        user = await authenticate_user(login_data.email, login_data.password)
+    except Exception:
+        # P0-009: LookupAggregationError / LookupCollisionError from
+        # authenticate_user → fail closed, do not silently select/create account
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -299,7 +339,13 @@ async def google_session(payload: GoogleSessionRequest):
 
     db = await get_database()
     # P0-009: transitionnal lookup — reuse legacy account if found
-    existing_user = await lookup_user_by_email(email)
+    try:
+        existing_user = await lookup_user_by_email(email)
+    except (LookupAggregationError, LookupCollisionError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email lookup temporarily unavailable, please retry"
+        )
     if existing_user:
         user_doc = {"_id": existing_user.id, "email": existing_user.email,
                      "first_name": existing_user.first_name, "last_name": existing_user.last_name,
@@ -330,9 +376,15 @@ async def google_session(payload: GoogleSessionRequest):
         }
         try:
             await db.users.insert_one(user_doc)
-        except Exception:
+        except pymongo.errors.DuplicateKeyError:
             # P0-009: DuplicateKeyError race — re-lookup
-            existing = await lookup_user_by_email(email)
+            try:
+                existing = await lookup_user_by_email(email)
+            except (LookupAggregationError, LookupCollisionError):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Email lookup temporarily unavailable, please retry"
+                )
             if existing:
                 user_doc = {"_id": existing.id, "email": existing.email,
                              "first_name": existing.first_name, "last_name": existing.last_name,

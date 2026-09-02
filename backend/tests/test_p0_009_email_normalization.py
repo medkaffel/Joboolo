@@ -218,6 +218,14 @@ class _FakeCollection:
         return None
 
     async def insert_one(self, doc, session=None):
+        # Enforce _id uniqueness like real Mongo
+        for existing in self._docs:
+            if existing.get("_id") == doc.get("_id"):
+                from pymongo.errors import DuplicateKeyError
+                raise DuplicateKeyError(
+                    f"E11000 duplicate key error collection: test users "
+                    f"index: _id_ dup key: {{ _id: {doc.get('_id')!r} }}"
+                )
         self._docs.append(dict(doc))
         return types.SimpleNamespace(inserted_id=doc.get("_id"))
 
@@ -448,8 +456,8 @@ class TestLookupUserByEmail:
         user = _run(lookup_user_by_email("bar@example.com"))
         assert user is None
 
-    def test_collision_returns_none(self):
-        from email_utils import lookup_user_by_email
+    def test_collision_raises_error(self):
+        from email_utils import lookup_user_by_email, LookupCollisionError
         # Two users with same canonical email
         self.db.users._docs.append({
             "_id": "u2", "email": " Foo@Example.COM ",
@@ -459,8 +467,8 @@ class TestLookupUserByEmail:
             "skills": [], "experience_years": None, "is_verified": False,
             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
         })
-        user = _run(lookup_user_by_email("foo@example.com"))
-        assert user is None  # fail-closed on collision
+        with pytest.raises(LookupCollisionError):
+            _run(lookup_user_by_email("foo@example.com"))
 
     def test_non_string_email_field_skipped(self):
         from email_utils import lookup_user_by_email
@@ -476,8 +484,8 @@ class TestLookupUserByEmail:
         user = _run(lookup_user_by_email("foo@example.com"))
         assert user is not None  # non-string email is skipped by $type guard
 
-    def test_db_none_returns_none(self):
-        from email_utils import lookup_user_by_email
+    def test_db_none_raises_aggregation_error(self):
+        from email_utils import lookup_user_by_email, LookupAggregationError
         import email_utils as _eu_mod
 
         async def _get_db_none():
@@ -487,15 +495,15 @@ class TestLookupUserByEmail:
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(_eu_mod, "get_database", _get_db_none)
         try:
-            user = _run(lookup_user_by_email("foo@example.com"))
-            assert user is None
+            with pytest.raises(LookupAggregationError):
+                _run(lookup_user_by_email("foo@example.com"))
         finally:
             monkeypatch.undo()
 
-    def test_aggregation_failure_fail_closed(self, monkeypatch):
-        """P0-009 FIX 2: aggregation failure must NOT fallback to find_one."""
+    def test_aggregation_failure_raises_error(self, monkeypatch):
+        """P0-009 FIX 2: aggregation failure must raise LookupAggregationError."""
         import email_utils as _eu_mod
-        from email_utils import lookup_user_by_email
+        from email_utils import lookup_user_by_email, LookupAggregationError
 
         self.db.users._docs.append({
             "_id": "u_legacy", "email": " Foo@Example.COM ",
@@ -515,8 +523,8 @@ class TestLookupUserByEmail:
         monkeypatch.setattr(_eu_mod, "get_database", _get_db)
         self.db.users.aggregate = _broken_aggregate
 
-        user = _run(lookup_user_by_email("foo@example.com"))
-        assert user is None  # fail-closed, NOT fallback to find_one
+        with pytest.raises(LookupAggregationError):
+            _run(lookup_user_by_email("foo@example.com"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1133,14 +1141,531 @@ class TestAllCreatePathsUseTransitionnalLookup:
         source = open(BACKEND_DIR / "email_utils.py").read()
         assert "find_one" not in source
 
-    def test_duplicate_key_error_handling_in_register(self):
+    def test_duplicate_key_error_only_in_register(self):
         source = open(BACKEND_DIR / "routes" / "auth.py").read()
-        assert "except Exception" in source
+        assert "pymongo.errors.DuplicateKeyError" in source
+        # Must NOT catch generic Exception on user inserts
+        lines = source.split("\n")
+        in_try_block = False
+        for line in lines:
+            stripped = line.strip()
+            if "insert_one" in stripped and "users" in stripped:
+                in_try_block = True
+            if in_try_block and stripped.startswith("except"):
+                assert "DuplicateKeyError" in stripped, (
+                    f"register insert uses '{stripped}' instead of DuplicateKeyError"
+                )
+                in_try_block = False
 
-    def test_duplicate_key_error_handling_in_alerts(self):
+    def test_duplicate_key_error_only_in_alerts(self):
         source = open(BACKEND_DIR / "routes" / "alerts.py").read()
-        assert "except Exception" in source
+        assert "pymongo.errors.DuplicateKeyError" in source
 
-    def test_duplicate_key_error_handling_in_admin(self):
+    def test_duplicate_key_error_only_in_admin(self):
         source = open(BACKEND_DIR / "routes" / "admin.py").read()
-        assert "except Exception" in source
+        assert "pymongo.errors.DuplicateKeyError" in source
+
+    def test_lookup_aggregation_error_imported_in_auth(self):
+        source = open(BACKEND_DIR / "routes" / "auth.py").read()
+        assert "LookupAggregationError" in source
+        assert "LookupCollisionError" in source
+
+    def test_lookup_aggregation_error_imported_in_alerts(self):
+        source = open(BACKEND_DIR / "routes" / "alerts.py").read()
+        assert "LookupAggregationError" in source
+        assert "LookupCollisionError" in source
+
+    def test_lookup_aggregation_error_imported_in_admin(self):
+        source = open(BACKEND_DIR / "routes" / "admin.py").read()
+        assert "LookupAggregationError" in source
+        assert "LookupCollisionError" in source
+
+
+# --------------------------------------------------------------------------- #
+# 13. P0-009 BUILD CORRECTION: aggregation error creates nothing              #
+# --------------------------------------------------------------------------- #
+class TestAggregationErrorCreatesNothing:
+    """When lookup_user_by_email raises LookupAggregationError, no create-path
+    must create a new account or silently reuse an existing one."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self._eu_mod = _eu_mod
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_agg_err_auth")
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_agg_err_alerts")
+
+    def _make_aggregation_fail(self, monkeypatch):
+        def _broken_aggregate(pipeline):
+            raise RuntimeError("MongoDB aggregation unavailable")
+        self.db.users.aggregate = _broken_aggregate
+
+    def test_register_aggregation_error_creates_nothing(self, monkeypatch):
+        """Aggregation error on /register must return 503 and create zero users."""
+        self._make_aggregation_fail(monkeypatch)
+        initial_count = len(self.db.users._docs)
+
+        async def scenario():
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503
+        assert len(self.db.users._docs) == initial_count  # nothing created
+
+    def test_register_partner_aggregation_error_creates_nothing(self, monkeypatch):
+        """Aggregation error on /register-partner must return 503 and create zero users."""
+        self._make_aggregation_fail(monkeypatch)
+        initial_count = len(self.db.users._docs)
+
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User",
+                company_name="Acme", signup_source=None, signup_referrer=None,
+                signup_landing=None, utm_source=None, utm_medium=None, utm_campaign=None,
+            )
+            await self.routes_auth.register_partner(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503
+        assert len(self.db.users._docs) == initial_count
+
+    def test_alerts_subscribe_aggregation_error_creates_nothing(self, monkeypatch):
+        """Aggregation error on /alerts/subscribe must return 503 and create zero users."""
+        self._make_aggregation_fail(monkeypatch)
+        initial_count = len(self.db.users._docs)
+
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            await self.routes_alerts.subscribe_alert(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503
+        assert len(self.db.users._docs) == initial_count
+
+
+# --------------------------------------------------------------------------- #
+# 14. P0-009 BUILD CORRECTION: collision >1 creates nothing silently          #
+# --------------------------------------------------------------------------- #
+class TestCollisionCreatesNothing:
+    """When lookup_user_by_email raises LookupCollisionError, no create-path
+    must create a new account or silently reuse an existing one."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_coll_auth")
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_coll_alerts")
+
+    def _seed_collision(self):
+        """Insert two users sharing the same canonical email."""
+        self.db.users._docs.extend([
+            {"_id": "u_coll1", "email": "foo@example.com",
+             "user_type": "candidate", "hashed_password": "hash1", "is_active": True,
+             "first_name": "A", "last_name": "B",
+             "phone": None, "location": None, "bio": None,
+             "skills": [], "experience_years": None, "is_verified": False,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+            {"_id": "u_coll2", "email": " Foo@Example.COM ",
+             "user_type": "candidate", "hashed_password": "hash2", "is_active": True,
+             "first_name": "C", "last_name": "D",
+             "phone": None, "location": None, "bio": None,
+             "skills": [], "experience_years": None, "is_verified": False,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+        ])
+
+    def test_register_collision_creates_nothing(self):
+        """Collision on /register must return 503 and create zero new users."""
+        self._seed_collision()
+        initial_count = len(self.db.users._docs)
+
+        async def scenario():
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503
+        assert len(self.db.users._docs) == initial_count
+
+    def test_register_partner_collision_creates_nothing(self):
+        """Collision on /register-partner must return 503 and create zero new users."""
+        self._seed_collision()
+        initial_count = len(self.db.users._docs)
+
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User",
+                company_name="Acme", signup_source=None, signup_referrer=None,
+                signup_landing=None, utm_source=None, utm_medium=None, utm_campaign=None,
+            )
+            await self.routes_auth.register_partner(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503
+        assert len(self.db.users._docs) == initial_count
+
+    def test_alerts_subscribe_collision_creates_nothing(self):
+        """Collision on /alerts/subscribe must return 503 and create zero new users."""
+        self._seed_collision()
+        initial_count = len(self.db.users._docs)
+
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            await self.routes_alerts.subscribe_alert(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503
+        assert len(self.db.users._docs) == initial_count
+
+
+# --------------------------------------------------------------------------- #
+# 15. P0-009 BUILD CORRECTION: non-DuplicateKeyError is not swallowed         #
+# --------------------------------------------------------------------------- #
+class TestNonDuplicateKeyErrorPropagates:
+    """Mongo/infra errors that are NOT DuplicateKeyError must NOT be converted
+    into a false 'email already used' response."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_nondk_auth")
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_nondk_alerts")
+
+    def test_register_non_dk_error_not_swallowed(self, monkeypatch):
+        """A non-DuplicateKeyError Mongo error on /register must NOT be converted
+        to 'email already used' — it should propagate as a server error."""
+        original_insert = self.db.users.insert_one
+
+        async def _infra_error(*a, **k):
+            raise RuntimeError("MongoNetworkError: connection lost")
+
+        self.db.users.insert_one = _infra_error
+
+        async def scenario():
+            user_data = _Model(
+                email="newuser@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(RuntimeError, match="MongoNetworkError"):
+            _run(scenario())
+
+    def test_alerts_non_dk_error_not_swallowed(self, monkeypatch):
+        """A non-DuplicateKeyError Mongo error on /alerts/subscribe must NOT be
+        converted to 'email already used'."""
+        original_insert = self.db.users.insert_one
+
+        async def _infra_error(*a, **k):
+            raise RuntimeError("MongoNetworkError: connection lost")
+
+        self.db.users.insert_one = _infra_error
+
+        async def scenario():
+            data = _Model(
+                email="newalert@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            await self.routes_alerts.subscribe_alert(data)
+
+        with pytest.raises(RuntimeError, match="MongoNetworkError"):
+            _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# 16. P0-009 BUILD CORRECTION: DuplicateKeyError handled deterministically    #
+# --------------------------------------------------------------------------- #
+class TestDuplicateKeyDeterministic:
+    """DuplicateKeyError on user inserts must yield a deterministic API response
+    (never a raw 500), with transitionnal re-lookup."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_dkdet_auth")
+        self.routes_alerts = _load(monkeypatch, "routes/alerts.py", "p009_dkdet_alerts")
+
+    def _seed_user(self, email_value, uid="existing_u1"):
+        self.db.users._docs.append({
+            "_id": uid, "email": email_value,
+            "user_type": "candidate", "hashed_password": "hash_ex", "is_active": True,
+            "first_name": "Existing", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+    def test_register_dk_with_legacy_relookup_returns_400(self):
+        """DuplicateKeyError with a legacy variant found → 400 (existing)."""
+        self._seed_user(" Foo@Example.COM ")
+
+        async def scenario():
+            user_data = _Model(
+                email="foo@example.com", password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 400
+
+    def test_register_dk_no_legacy_returns_409(self):
+        """DuplicateKeyError with no canonical match → 409 (conflict)."""
+        # Pre-insert a user with the same _id that register would generate.
+        # This simulates a race condition where another request inserted first.
+        email = "racecondition@example.com"
+        _id = f"user_{email}_{hash(email)}"
+        self.db.users._docs.append({
+            "_id": _id, "email": "other@example.com",  # different email, same _id
+            "user_type": "candidate", "hashed_password": "hash_ex", "is_active": True,
+            "first_name": "Racer", "last_name": "User",
+            "phone": None, "location": None, "bio": None,
+            "skills": [], "experience_years": None, "is_verified": False,
+            "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+        })
+
+        async def scenario():
+            user_data = _Model(
+                email=email, password="secret",
+                first_name="Test", last_name="User", user_type="candidate",
+            )
+            await self.routes_auth.register(user_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        # 409 because relookup finds nothing (the pre-inserted user has different email)
+        assert exc.value.status_code == 409
+
+    def test_alerts_dk_with_existing_returns_user_id(self):
+        """DuplicateKeyError on alerts/subscribe with existing user → reuses."""
+        self._seed_user("foo@example.com", uid="existing_alert_u")
+
+        async def scenario():
+            data = _Model(
+                email="foo@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            return await self.routes_alerts.subscribe_alert(data)
+
+        result = _run(scenario())
+        assert result["success"] is True
+        assert result["created_account"] is False
+
+    def test_alerts_dk_no_existing_returns_409(self):
+        """DuplicateKeyError on alerts/subscribe with no match → 409."""
+        from pymongo.errors import DuplicateKeyError
+        original_insert = self.db.users.insert_one
+
+        async def _always_dk(doc, **kwargs):
+            # Always raise DuplicateKeyError (simulating a concurrent _id collision)
+            # regardless of what is actually in the db.
+            raise DuplicateKeyError("duplicate key")
+
+        self.db.users.insert_one = _always_dk
+
+        async def scenario():
+            data = _Model(
+                email="newuser@example.com", search=None, location=None,
+                job_type=None, search_mode="simple", result_count=None, origin=None,
+            )
+            await self.routes_alerts.subscribe_alert(data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# 17. P0-009 BUILD CORRECTION: login fails closed on lookup errors            #
+# --------------------------------------------------------------------------- #
+class TestLoginFailsClosedOnLookupError:
+    """Login/JWT must fail without selecting or creating an account when
+    lookup_user_by_email raises LookupAggregationError or LookupCollisionError."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        _install_stubs(monkeypatch)
+        self.db = _FakeDB()
+        db_ref = self.db
+
+        async def _get_db():
+            return db_ref
+
+        database = types.ModuleType("database")
+        database.get_database = _get_db
+        database.get_client = lambda: None
+        monkeypatch.setitem(sys.modules, "database", database)
+
+        import email_utils as _eu_mod
+        monkeypatch.setattr(_eu_mod, "get_database", _get_db)
+
+        auth = types.ModuleType("auth")
+        auth.get_current_active_user = lambda *a, **k: None
+        auth.require_employer = lambda *a, **k: None
+        auth.require_admin = lambda *a, **k: None
+        auth.get_password_hash = lambda p: "hashed_" + p
+        auth.authenticate_user = None
+        auth.create_access_token = lambda data, expires_delta=None: "jwt_token_" + str(data.get("sub", ""))
+        auth.get_user_by_email = lambda e: None
+        monkeypatch.setitem(sys.modules, "auth", auth)
+
+        self._eu_mod = _eu_mod
+        self.routes_auth = _load(monkeypatch, "routes/auth.py", "p009_login_fail_auth")
+
+    def test_login_aggregation_error_returns_503(self, monkeypatch):
+        """Login with aggregation error must return 503, not select any account."""
+        def _broken_aggregate(pipeline):
+            raise RuntimeError("MongoDB aggregation unavailable")
+        self.db.users.aggregate = _broken_aggregate
+
+        async def scenario():
+            login_data = _Model(email="foo@example.com", password="secret",
+                                expected_user_type=None)
+            await self.routes_auth.login(login_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503
+
+    def test_login_collision_returns_503(self):
+        """Login with collision must return 503, not select any account."""
+        self.db.users._docs.extend([
+            {"_id": "u1", "email": "foo@example.com",
+             "user_type": "candidate", "hashed_password": "hash1", "is_active": True,
+             "first_name": "A", "last_name": "B",
+             "phone": None, "location": None, "bio": None,
+             "skills": [], "experience_years": None, "is_verified": False,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+            {"_id": "u2", "email": " Foo@Example.COM ",
+             "user_type": "candidate", "hashed_password": "hash2", "is_active": True,
+             "first_name": "C", "last_name": "D",
+             "phone": None, "location": None, "bio": None,
+             "skills": [], "experience_years": None, "is_verified": False,
+             "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()},
+        ])
+
+        async def scenario():
+            login_data = _Model(email="foo@example.com", password="secret",
+                                expected_user_type=None)
+            await self.routes_auth.login(login_data)
+
+        with pytest.raises(_HTTPException) as exc:
+            _run(scenario())
+        assert exc.value.status_code == 503

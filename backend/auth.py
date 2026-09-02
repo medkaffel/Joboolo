@@ -51,12 +51,20 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 async def get_user_by_email(email: str) -> Optional[User]:
-    """Get user by email (P0-009: canonical lookup)."""
+    """Get user by email (P0-009: canonical lookup).
+
+    Raises ``LookupAggregationError`` or ``LookupCollisionError`` on
+    ambiguous states — callers MUST propagate or fail-closed.
+    """
     from email_utils import lookup_user_by_email
     return await lookup_user_by_email(email)
 
 async def authenticate_user(email: str, password: str) -> Optional[User]:
-    """Authenticate user with email and password (P0-009: canonical lookup)."""
+    """Authenticate user with email and password (P0-009: canonical lookup).
+
+    Raises ``LookupAggregationError`` or ``LookupCollisionError`` on
+    ambiguous lookup states — callers MUST propagate or fail-closed.
+    """
     user = await get_user_by_email(email)
     if not user:
         return None
@@ -89,6 +97,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     
     user = await get_user_by_email(email=token_data.email)
     if user is None:
+        # P0-009: LookupAggregationError / LookupCollisionError propagate
+        # up as unhandled exceptions (HTTP 500) — the JWT cannot be
+        # resolved safely, so we MUST NOT select or create an account.
         raise credentials_exception
     return user
 
