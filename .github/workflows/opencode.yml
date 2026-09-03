@@ -77,7 +77,9 @@ jobs:
             }))
           }' /tmp/thread-full.json > /tmp/thread.json
 
-          if printf '%s' "$COMMENT_BODY" | grep -Eiq '^/(oc|opencode)[[:space:]]+build\b|\bBUILD\b'; then
+          # Only an explicit command prefix can select BUILD mode. Merely mentioning
+          # the word "build" later in a PLAN comment must never create a branch.
+          if printf '%s' "$COMMENT_BODY" | grep -Eiq '^/(oc|opencode)[[:space:]]+build([[:space:]]|$)'; then
             MODE="build"
           else
             MODE="plan"
@@ -86,7 +88,7 @@ jobs:
           {
             echo "You are working on GitHub $([ "$IS_PR" = "true" ] && echo "pull request" || echo "issue") #$NUMBER in $GITHUB_REPOSITORY."
             echo
-            echo "Read AGENTS.md, ARCHITECTURE.md, BUSINESS_RULES.md, TESTING.md and P0_AUDIT.md when present."
+            echo "Read AGENTS.md, TALENT_STREAM_SPEC.md, ARCHITECTURE.md, BUSINESS_RULES.md, TESTING.md and P0_AUDIT.md when present."
             echo
             echo "ENGINEERING SAFETY: ne jamais modifier massivement le projet sans analyser les dépendances. Privilégier les changements minimaux. Après toute modification, quand les commandes existent et sont pertinentes, lancer les tests, le typecheck et le build applicables, puis corriger toute régression introduite avant de terminer. En mode PLAN, appliquer la même discipline à l'analyse et signaler les dépendances/risques sans modifier le projet."
             echo
@@ -144,6 +146,16 @@ jobs:
             --model "$MODEL" \
             "Read the attached task context and execute it exactly." \
             --file=/tmp/opencode-prompt.txt | tee /tmp/opencode-output.txt
+
+      - name: Enforce read-only plan
+        if: steps.context.outputs.mode == 'plan'
+        shell: bash
+        run: |
+          if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            echo "PLAN mode modified the repository; refusing to continue." >&2
+            git status --short >&2
+            exit 1
+          fi
 
       - name: Run OpenCode build
         if: steps.context.outputs.mode == 'build'
@@ -226,7 +238,7 @@ jobs:
           COMMENT_BODY="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
           IS_PR="$(jq -r 'if .issue.pull_request then "true" else "false" end' "$GITHUB_EVENT_PATH")"
 
-          if printf '%s' "$COMMENT_BODY" | grep -Eiq '^/(oc|opencode)[[:space:]]+build\b|\bBUILD\b'; then
+          if printf '%s' "$COMMENT_BODY" | grep -Eiq '^/(oc|opencode)[[:space:]]+build([[:space:]]|$)'; then
             MODE_VALUE="build"
           else
             MODE_VALUE="plan"
@@ -279,7 +291,7 @@ jobs:
             fi
           fi
 
-          TASK_VALUE="$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq '.title' 2>/dev/null | sed -nE 's/.*(P0-[0-9]+).*/\1/p' | head -1 || true)"
+          TASK_VALUE="$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq '.title' 2>/dev/null | sed -nE 's/.*(P0-[0-9]+|TS-[A-Z0-9]+-[0-9]+).*/\1/p' | head -1 || true)"
           if [ -z "$TASK_VALUE" ]; then
             TASK_VALUE="UNKNOWN"
           fi
