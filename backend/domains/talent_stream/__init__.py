@@ -1,0 +1,1 @@
+"""Talent Stream domain contracts: Stream aggregate, projections, contact requests."""

@@ -1,0 +1,1 @@
+"""Shared kernel: primitive IDs, versioning, and event envelopes."""

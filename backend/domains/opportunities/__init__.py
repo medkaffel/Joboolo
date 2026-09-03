@@ -1,0 +1,1 @@
+"""Opportunities domain contracts: Opportunity Specification, Stream Requirement."""

@@ -1,0 +1,1 @@
+"""Joboolo Talent Stream domain contracts package."""

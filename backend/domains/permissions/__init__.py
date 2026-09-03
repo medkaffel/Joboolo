@@ -1,0 +1,1 @@
+"""Permissions domain contracts: discovery/contact authorization, scoped grants, exclusions."""

@@ -1,0 +1,1 @@
+"""Roles domain contracts: Role DNA, taxonomy references, normalization contracts."""
