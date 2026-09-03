@@ -1,33 +1,73 @@
 # Joboolo Architecture — Talent Stream Reference
 
 **Status:** Canonical architecture reference  
+**Version:** 1.1  
+**Last architecture review:** 2026-09-03  
 **Architecture style:** Modular Monolith (FastAPI + MongoDB)  
 **Strategic product:** Talent Stream  
 **Applies to:** Talent Stream Phases A through E
 
-> This file defines architectural boundaries and sequencing. It does not authorize out-of-scope implementation. The active GitHub issue is always the only authorized implementation scope.
+> This file defines architectural boundaries, dependencies, sequencing and Gates. It does not authorize out-of-scope implementation. The active GitHub issue/PR is always the only authorized implementation scope.
 
 ---
 
 ## 1. Architecture goals
 
-Joboolo must evolve from its current job-board-oriented backend into a Talent Platform without introducing premature microservices or distributed-system complexity.
+Joboolo must evolve from its current job-board-oriented backend into a Talent Platform without introducing premature distributed-system complexity.
 
 Primary goals:
 
 1. Make Talent Stream the signature product without coupling it permanently to `job_id`.
 2. Reuse the current FastAPI/MongoDB application while creating clear domain boundaries.
-3. Separate professional Match, Intent, Trust and Permission.
+3. Separate Professional Match, Opportunity Fit, Discovery, Intent, Trust and Permission.
 4. Preserve strict CV/document access control.
 5. Allow own-job, reference-job, external-job and free-text sourcing to converge to one canonical Stream Requirement.
-6. Make derived ranking/projection data reconstructible.
-7. Make sensitive actions idempotent, auditable and authorization-checked at action time.
+6. Make ranking/projection data reconstructible.
+7. Make sensitive actions idempotent, auditable, versioned and authorization-checked at action time.
 8. Build Cross-Offer Intent without exposing competitor-source behavior.
-9. Protect Joboolo’s reputation by making privacy/trust mechanisms part of the product architecture, not post-processing.
+9. Treat privacy, recruiter fairness and anti-spam as architecture, not post-processing.
+10. Support passive/open candidates via Discovery Pool without requiring recent intent.
 
 ---
 
-## 2. Chosen architecture style
+## 2. Program model: Circles, Phases and Gates
+
+These are complementary axes.
+
+### Circles = strategic proximity to Talent Stream
+
+| Circle | Meaning | Examples |
+|---|---|---|
+| **C0 — Signature** | Talent Stream core behavior | Stream, introductions, Cross-Offer, No-Posting |
+| **C1 — Vital foundation** | Required for quality/safety | Role DNA, Profile, Match, Trust, Permission, Privacy, Opportunity Fit |
+| **C2 — Multipliers** | Strongly increases Talent Stream value | Recommendations, Analytics, Market Intelligence, Semantic Search, Rediscovery, Responsible AI, ATS |
+| **C3 — Ecosystem expansion** | Extends the talent network | CRM, Reverse Marketplace, Skills Passport, Skill Gap, Candidate Agent, Train-to-Hire |
+| **C4 — Peripheral workflow** | Useful but must not delay signature path | CV Assistant, Interview Coach, Employer Pages, Scheduling, WhatsApp/QR, job-writing copilot |
+
+Circle is **not** implementation order by itself.
+
+### Phases = construction sequence
+
+- **Phase A — Talent Engine & Trust Foundation**
+- **Phase B — Talent Stream MVP**
+- **Phase C — Cross-Offer Intent & Moat**
+- **Phase D — No-Posting Talent Stream**
+- **Phase E — Intelligence & Scale**
+
+### Gates = permission to progress
+
+- **G0** — Baseline
+- **GA** — Talent Engine & Trust Ready
+- **GB** — Talent Stream MVP Ready
+- **GC** — Cross-Offer Safe & Effective
+- **GD** — No-Posting Ready
+- **GE** — Talent Platform Ready
+
+Macro phases are sequential at Gate level, but independent lots inside a phase may execute in parallel after their dependencies are satisfied.
+
+---
+
+## 3. Chosen architecture style
 
 ### Modular Monolith
 
@@ -37,12 +77,12 @@ Do **not** introduce microservices merely to create conceptual separation.
 
 Reasons:
 
-- current product maturity does not justify distributed-system cost;
+- current maturity does not justify distributed-system cost;
+- one codebase simplifies atomic authorization/privacy changes;
 - MongoDB transactions/outbox/workers are sufficient for current workflows;
-- one codebase simplifies atomic authorization and privacy changes;
-- modular boundaries can be extracted later if scale and organization justify it.
+- modular boundaries can later be extracted if scale and organization justify it.
 
-Target conceptual modules:
+Target conceptual structure:
 
 ```text
 backend/
@@ -56,6 +96,7 @@ backend/
     trust/
     permissions/
     privacy/
+    recruiter_os/
     analytics/
   integrations/
     ats/
@@ -68,130 +109,76 @@ backend/
 
 This is a progressive target. Do not perform a global file move/refactor unless a dedicated issue explicitly authorizes it.
 
+Routes should progressively become thin HTTP adapters; domain logic should not be duplicated across routes.
+
 ---
 
-## 3. Bounded contexts
+## 4. Bounded contexts
 
 ### profiles
-
-Owns:
-
-- Candidate Professional Profile;
-- Candidate Preferences;
-- Discovery State;
-- candidate profile/preference versioning.
-
-Does not own recruiter authorization or Talent Stream ranking.
+Owns Candidate Professional Profile, Candidate Preferences, Discovery State and their versioning.
 
 ### roles
-
-Owns:
-
-- Role DNA;
-- occupation/skill taxonomy;
-- role normalization;
-- role similarity inputs;
-- Role Clusters as derived data.
+Owns Role DNA, occupation/skill taxonomy, role normalization, role-similarity inputs and Role Clusters as derived data.
 
 ### opportunities
-
-Owns:
-
-- Opportunity Specification;
-- job/need-specific constraints;
-- Stream Requirement composition from Role DNA + Opportunity Specification.
+Owns Opportunity Specification, job/need-specific constraints and composition of Stream Requirement from Role DNA + Opportunity Specification.
 
 ### matching
-
-Owns:
-
-- Professional Match;
-- hard eligibility filters;
-- Opportunity Fit;
-- reason codes;
-- match engine versioning.
-
-Does not own candidate consent or recruiter trust.
+Owns Professional Match, hard eligibility, Opportunity Fit, reason codes and match-engine versioning. Does not own permission/trust.
 
 ### intent
-
-Owns:
-
-- intent event contract;
-- event provenance;
-- Job Intent;
-- Role Intent;
-- Company Intent;
-- Market Intent;
-- recency/aggregation;
-- intent engine versioning.
-
-Does not grant recruiter access to the candidate.
+Owns intent event contracts/provenance, Job/Role/Company/Market Intent, recency/aggregation and intent-engine versioning. Discovery is **not** owned here.
 
 ### talent_stream
-
-Owns:
-
-- Stream aggregate/lifecycle;
-- retrieval orchestration;
-- Stream Requirement binding;
-- candidate projections/read models;
-- contact request orchestration;
-- introductions.
-
-Talent Stream consumes Match/Intent/Trust/Permission outcomes; it must not redefine them locally.
+Owns Stream aggregate/lifecycle, retrieval orchestration, Stream Requirement binding, candidate projections/read models, contact-request orchestration and introduction lifecycle. It consumes policy outcomes; it must not redefine Match, Trust or Permission locally.
 
 ### trust
-
-Owns:
-
-- organization/company verification;
-- recruiter verification;
-- organization membership;
-- recruiting mandates;
-- source protection;
-- Contact Governor policy inputs;
-- recruiter eligibility.
+Owns organization/company verification, recruiter verification, memberships, recruiting mandates, source protection, Contact Governor policy/state and recruiter eligibility.
 
 ### permissions
-
-Owns:
-
-- candidate discovery authorization;
-- scoped grants;
-- exclusions;
-- current authorization decision;
-- profile versus identity versus CV scope.
-
-A projection snapshot is never an authorization source of truth.
+Owns discovery/contact authorization, scoped grants, company/employer exclusions and current authorization decisions. Cached projection state is never the authorization source of truth.
 
 ### privacy
+Owns retention, expiry/revocation semantics, anonymous rendering/redaction, re-identification safeguards, deletion/anonymization lifecycle and privacy/audit policy.
 
-Owns:
-
-- retention;
-- revocation/expiry semantics;
-- privacy-safe anonymous rendering policy;
-- anonymization/redaction;
-- audit policy;
-- deletion/anonymization lifecycle.
+### recruiter_os
+Owns application/pipeline/CRM workflow integrations once a relationship is authorized. Existing application semantics remain preserved.
 
 ### analytics
-
-Owns:
-
-- Talent Stream funnel metrics;
-- recruiter/market aggregates;
-- quality and conversion metrics;
-- derived reporting models.
-
-Analytics data must not become an alternate authorization path.
+Owns Talent Stream funnel, market/trust aggregates, quality metrics and derived reporting. Analytics must never become an authorization bypass.
 
 ---
 
-## 4. Core domain relationships
+## 5. Allowed dependency direction
 
-### Candidate side
+Preferred dependency direction:
+
+```text
+profiles ───────┐
+roles ──────────┼──> matching ───────┐
+opportunities ──┘                    │
+                                     │
+intent ──────────────────────────────┤
+trust ───────────────────────────────┤
+permissions ─────────────────────────┤──> talent_stream ──> recruiter_os
+privacy ─────────────────────────────┤
+analytics <──────── events/projections┘
+```
+
+Avoid circular dependencies such as:
+
+- `talent_stream -> matching -> talent_stream`;
+- `permissions -> talent_stream -> permissions`;
+- `trust -> routes -> trust`.
+
+Shared primitive IDs/value objects may live in a small neutral shared layer when necessary; do not create a giant “common” module that becomes a dumping ground.
+
+---
+
+## 6. Core domain relationships
+
+### Candidate
 
 ```text
 Candidate
@@ -200,7 +187,7 @@ Candidate
   └── Discovery State
 ```
 
-### Recruiter need side
+### Recruiter need
 
 ```text
 Need Source
@@ -216,7 +203,7 @@ Need Source
   Stream Requirement
 ```
 
-### Evaluation side
+### Evaluation
 
 ```text
 Professional Profile ↔ Role DNA
@@ -226,7 +213,26 @@ Candidate Preferences ↔ Opportunity Specification
         = Opportunity Fit
 ```
 
-### Talent Stream orchestration
+### Retrieval paths
+
+```text
+DISCOVERY PATH
+Discovery enabled
+  + Match/Fit
+
+INTENT PATH
+Eligible Role/Market Intent
+  + Match/Fit
+  + provenance/source policy
+```
+
+Both converge into Trust, current Permission, Contact Governor and recruiter-facing projection.
+
+---
+
+## 7. Talent Stream policy pipeline
+
+Canonical orchestration:
 
 ```text
 Stream Requirement
@@ -234,81 +240,41 @@ Stream Requirement
       ├── Discovery Retrieval
       └── Intent Retrieval
               │
-              ↓
+              ▼
       Professional Match
-              ↓
+              ▼
       Hard Eligibility
-              ↓
+              ▼
       Opportunity Fit
-              ↓
+              ▼
       Evidence/Provenance Policy
-              ↓
-      Source Protection
-              ↓
-      Trust
-              ↓
-      Current Permission
-              ↓
+              ▼
+      Independent Signal Rule (Cross-Offer)
+              ▼
+      Origin Neutralization / Source Protection
+              ▼
+      Recruiter/Organization Trust
+              ▼
+      Current Candidate Permission / Exclusions
+              ▼
       Contact Governor
-              ↓
-      Stream Projection / Contact Request
+              ▼
+      Privacy-safe Stream Projection
+              ▼
+      Contact Request
+              ▼
+      Candidate Decision
+              ▼
+      Scoped Grant / Reveal / Messaging
 ```
+
+A denied Trust/Permission/Source-Protection decision cannot be overridden by a high Match score.
 
 ---
 
-## 5. Critical architectural separation
+## 8. Authoritative data versus projections
 
-The following dimensions must remain separately queryable and explainable:
-
-- Professional Match;
-- Opportunity Fit;
-- Job Intent;
-- Role Intent;
-- Company Intent;
-- Market Intent;
-- Recruiter Trust;
-- Candidate Permission;
-- Source Protection state;
-- Contact eligibility.
-
-Do not create one authoritative opaque `talent_score` that replaces these concepts.
-
-An internal ordering/ranking function may combine factors, but underlying components and reason codes must remain available.
-
----
-
-## 6. Discovery and Intent are parallel retrieval paths
-
-Talent Stream must not require recent intent for every talent.
-
-### Discovery path
-
-```text
-Discovery enabled
-  + Professional Match
-  + Opportunity Fit
-  + Trust/Permission
-```
-
-### Intent path
-
-```text
-Eligible Role/Market Intent
-  + Professional Match
-  + Opportunity Fit
-  + provenance/source policy
-  + Trust/Permission
-```
-
-Both paths converge before recruiter contact.
-
----
-
-## 7. Authoritative data versus projections
-
-### Authoritative / source-of-truth collections
-
-Target conceptual collections:
+### Authoritative / source-of-truth targets
 
 - `candidate_profiles`
 - `candidate_preferences`
@@ -318,26 +284,30 @@ Target conceptual collections:
 - `talent_intent_events`
 - `talent_stream_contact_requests`
 - `talent_stream_grants`
-- `organizations` or equivalent canonical company/organization representation
+- `organizations` (or approved canonical equivalent)
 - `organization_memberships`
 - `recruiter_verifications`
 - `recruiting_mandates`
-- `source_protection_records` where persistence is required
+- `source_protection_records` when persistent evidence is required
+- outbox/idempotency records as required
 
-### Derived / reconstructible collections
+### Derived / reconstructible targets
 
 - `role_clusters`
 - `role_intent_aggregates`
 - `talent_stream_candidates`
 - `market_intelligence_aggregates`
+- ranking/read-model caches
 
-A read model must never become the sole source of truth for permission, trust or consent.
+If a projection is lost, authoritative source data must support rebuild.
+
+A read model is never the sole source of truth for current Permission, Trust or consent.
 
 ---
 
-## 8. Stream candidate projection
+## 9. Stream candidate projection
 
-A future `talent_stream_candidates` projection may contain fields such as:
+A future `talent_stream_candidates` read model may contain:
 
 ```text
 stream_id
@@ -366,69 +336,69 @@ computed_at
 expires_at
 ```
 
-Important:
+Rules:
 
 - snapshots support audit/explanation;
-- current authorization is recalculated before a sensitive action;
-- do not duplicate unnecessary email, phone, CV or exact sensitive attributes in projections.
+- current authorization is recalculated before sensitive actions;
+- do not duplicate unnecessary email, phone, CV or exact sensitive attributes in projections;
+- a projection may rank/order candidates but must not silently become a permanent candidate record.
 
 ---
 
-## 9. Authorization architecture
+## 10. Authorization architecture
 
 Sensitive actions include at least:
 
-- reveal identity;
+- request recruiter introduction;
 - reveal detailed profile;
+- reveal identity/contact information;
 - access/download CV;
-- request introduction;
-- send recruiter-to-candidate message;
-- expose contact information.
+- open recruiter-to-candidate messaging.
 
-Canonical pattern:
+Canonical policy decision:
 
 ```text
 Requested action
       ↓
-Current candidate state
+Current discovery/preference state
 Current grant state
 Current exclusions
 Recruiter/company/mandate state
-Source protection state
-Contact Governor state
+Source-protection state
+Contact-Governor state
       ↓
 Central policy decision
       ↓
 ALLOW / DENY
 ```
 
-Never authorize from a cached Stream projection alone.
+Never authorize from cached Stream projection alone.
 
 ---
 
-## 10. Existing CV ACL integration
+## 11. Existing CV ACL integration
 
-The current restrictive document access model must remain the baseline.
+Preserve the current restrictive document-access philosophy.
 
-Target policy extension:
+Target extension:
 
 ```text
 ALLOW CV IF
   owner
-  OR admin
+  OR authorized admin
   OR exact authorized application relationship
   OR active scoped Talent Stream CV grant
 ```
 
 Never introduce `if employer: allow` or an equivalent broad recruiter bypass.
 
-Profile access and CV access are distinct permissions.
+Profile access, identity access and CV access are distinct scopes.
 
 ---
 
-## 11. Organization and recruiter model
+## 12. Organization / recruiter / mandate model
 
-Talent Stream requires more than a user role such as `employer`.
+`user_type=employer` is insufficient for nominative Talent Stream access.
 
 Canonical concepts:
 
@@ -450,22 +420,24 @@ Recruiting Mandate
 Hiring Company
 ```
 
-A Stream should be capable of distinguishing:
+A Stream must be capable of distinguishing:
 
 - `recruiter_user_id`;
 - `requesting_organization_id`;
 - `hiring_company_id`;
 - `mandate_id` when applicable.
 
+Confidential recruiting may hide company identity from the candidate temporarily under product policy, but Joboolo must still internally verify these entities.
+
 ---
 
-## 12. Intent event architecture
+## 13. Intent event architecture and provenance
 
-CPC/billing click events and candidate intent events are separate domains.
+CPC/billing click events and candidate-intent events are separate domains.
 
 Do not add Talent Stream identity semantics directly to the CPC ledger.
 
-Future intent event envelope should conceptually support:
+Future intent event envelope conceptually supports:
 
 ```text
 event_id
@@ -484,13 +456,15 @@ retention_until
 created_at
 ```
 
-Provenance may be stored internally to apply source protection. It must not be exposed to recruiters as competitor intelligence.
+Provenance may be retained internally for source-protection/evidence policy but must never become recruiter-visible competitor intelligence.
+
+Discovery enablement is a preference/permission event/state, not Role Intent itself.
 
 ---
 
-## 13. Event/outbox strategy
+## 14. Event/outbox and async strategy
 
-Do not introduce Kafka or microservices in the initial Talent Stream phases.
+Do not introduce Kafka or microservices in initial Talent Stream phases.
 
 Preferred pattern:
 
@@ -500,7 +474,7 @@ MongoDB transaction where required
   + idempotent worker
 ```
 
-Examples of async work:
+Async examples:
 
 - recompute affected Streams;
 - Role DNA enrichment;
@@ -508,13 +482,15 @@ Examples of async work:
 - Intent aggregation;
 - analytics rollups.
 
-The action “candidate is eligible for a Stream” and the action “send an invitation” must remain separate operations.
+Eligibility computation and invitation sending are separate operations.
+
+Workers must be retryable, idempotent, version-aware and observable.
 
 ---
 
-## 14. Idempotency requirements
+## 15. Idempotency requirements
 
-Sensitive commands must be designed to tolerate retries.
+Sensitive commands must tolerate retries.
 
 Examples:
 
@@ -526,23 +502,23 @@ Examples:
 - consume accepted-introduction credit;
 - process ATS callback.
 
-Retries must not produce duplicate invitations, duplicate grants, duplicate charges or duplicate canonical events.
+Retries must not produce duplicate invitations, grants, canonical events or charges.
 
-Use explicit unique/idempotency keys where appropriate.
+Use explicit command/event/idempotency keys where appropriate.
 
 ---
 
-## 15. Versioning
+## 16. Versioning and snapshots
 
 Version at minimum where applicable:
 
-- candidate professional profile;
-- candidate preferences/discovery state;
+- Candidate Professional Profile;
+- Candidate Preferences/Discovery State;
 - Role DNA;
 - Opportunity Specification;
 - Match Engine;
 - Intent Engine;
-- authorization/privacy policy;
+- authorization/privacy/source-protection policy;
 - consent policy/text;
 - event schema.
 
@@ -552,280 +528,319 @@ A source job changing later must not silently redefine an existing Stream. Updat
 
 ---
 
-## 16. Matching architecture
+## 17. Matching and Role Cluster architecture
 
-The existing LLM-based matching may remain available during migration.
+The existing LLM-based matching may remain during migration, but authoritative Talent Stream decisions should become reproducible/versioned.
 
-Target authoritative Talent Stream matching should combine:
+Target Professional Match combines:
 
 - structured fields;
 - normalized role/skill taxonomy;
-- embeddings/semantic similarity where useful;
+- semantic embeddings where useful;
 - deterministic hard filters;
-- explicit scoring/reason codes;
-- LLM enrichment and human-readable explanation as supporting functionality.
+- explicit scores/reason codes;
+- LLM enrichment/explanation as supporting functionality.
 
-The LLM must not be the sole source of truth for:
+Role Similarity / Role Clusters use a hybrid approach:
 
-- hard eligibility;
-- recruiter authorization;
-- candidate permission;
-- CV access;
-- final Role Similarity;
-- Cross-Offer source-protection decisions.
+- occupation taxonomy;
+- structured Role DNA similarity;
+- skills/seniority/business constraints;
+- semantic embeddings;
+- versioned thresholds/rules;
+- reason/evidence output.
+
+Do not use an opaque LLM-only clustering decision as the canonical source of Cross-Offer eligibility.
+
+Offer Similarity, Candidate Match and Candidate Intent remain separate.
 
 ---
 
-## 17. Anonymous Talent architecture
+## 18. Anonymous Talent and privacy architecture
 
-Removing a name is not sufficient anonymization.
+Removing a name is insufficient anonymization.
 
-Anonymous recruiter cards require a privacy/redaction policy that may generalize or remove:
+Anonymous cards may generalize/remove:
 
 - exact location;
 - exact current employer;
 - rare identifying credentials;
-- unusual combinations of attributes;
+- unusual attribute combinations;
 - overly precise experience details.
 
-Market analytics should also apply minimum cohort thresholds where small segments could reveal individuals.
+Market analytics should apply minimum cohort/privacy thresholds where small segments could reveal individuals.
+
+Anonymous rendering policy must be versioned/testable enough to support regression checks.
 
 ---
 
-## 18. Role Similarity and Cross-Offer boundary
+## 19. Cross-Offer boundary and Source Protection Window
 
-Cross-Offer is implemented in two distinct stages.
+Cross-Offer has two distinct stages.
 
 ### Internal retrieval
-
-The backend may compute that a candidate is relevant to a similar role.
+Backend may compute that a candidate is relevant to a similar role.
 
 ### Recruiter exposure
-
-The candidate must not appear in recruiter-facing Cross-Offer results until all of the following are satisfied:
+Candidate must not appear in recruiter-facing Cross-Offer results until applicable safeguards are satisfied:
 
 - Independent Signal Rule;
 - origin neutralization;
 - Source Protection;
-- candidate Cross-Offer/discovery permission;
-- recruiter/company trust;
+- candidate discovery/Cross-Offer permission;
+- recruiter/company/mandate trust;
 - exclusions;
 - Contact Governor;
-- Opportunity Fit as required.
+- Opportunity Fit.
+
+Source-protection policy must support configurable timing/cooling behavior such as a **Source Protection Window** for source-sensitive/paid acquisition signals. Duration is a versioned policy, not a hardcoded business constant.
 
 Internal relevance is not authorization to expose.
 
 ---
 
-## 19. Index and migration strategy
+## 20. Index and migration strategy
 
 Do not put all future Talent Stream schema/index changes into startup mutation code.
 
 Rules:
 
-- startup-safe non-destructive index creation may remain acceptable for simple cases;
+- simple startup-safe non-destructive indexes may be acceptable;
 - sensitive unique indexes require explicit migration/preflight;
 - migrations must handle existing data safely;
-- startup must fail safely when a required invariant is not met;
+- startup must fail safely when required invariants are not met;
 - TTL indexes are cleanup mechanisms only.
 
-Example:
-
-If `grant.expires_at` has passed, authorization must deny immediately even if MongoDB’s TTL monitor has not physically removed the document.
+If `grant.expires_at` has passed, authorization denies immediately even if MongoDB TTL has not physically removed the document.
 
 ---
 
-## 20. Phase architecture
+# 21. Canonical delivery map
 
-### Phase A — Talent Engine & Trust Foundation
+The IDs below are the canonical roadmap identifiers. Individual issues may further split a lot, but must not silently merge future lots into current scope.
 
-Canonical work areas:
+## Phase A — Talent Engine & Trust Foundation
 
-- A0 domain contracts, versioning, idempotency and migration strategy;
-- candidate professional profile;
-- preferences/discovery;
-- Role DNA;
-- Opportunity Specification;
-- Match Engine v2;
-- hard eligibility / Opportunity Fit v1;
-- organization verification;
-- recruiter membership/mandate;
-- authorization/grants;
-- privacy lifecycle;
-- intent event/provenance contract;
-- audit/reason codes.
-
-### Phase B — Talent Stream MVP
-
-Use only safe sources initially:
-
-- applications;
-- “I’m interested”;
-- explicitly shared favorite;
-- Discovery Pool.
-
-Then:
-
-- Stream aggregate;
-- candidate projection;
-- privacy-safe anonymous cards;
-- Contact Governor;
-- contact request;
-- candidate accept/decline;
-- current authorization check;
-- progressive reveal;
-- CV grant;
-- messaging adapter;
-- analytics.
-
-### Phase C — Cross-Offer Intent & Moat
-
-- Role Similarity;
-- Role Clusters;
-- observed intent;
-- four intent dimensions;
-- internal Cross-Offer retrieval;
-- provenance/evidence evaluation;
-- Independent Signal Rule;
-- origin neutralization;
-- Source Protection;
-- Cross-Offer permission;
-- Contact Governor v2;
-- safe recruiter projection;
-- Opportunity Fit v2;
-- Salary Intelligence / Semantic Search / Rediscovery / AI governance as parallel multipliers.
-
-### Phase D — No-Posting Talent Stream
-
-- own job as template;
-- another Joboolo job as role model;
-- natural-language requirement;
-- one common no-posting wizard;
-- confidential Stream;
-- market preview;
-- later safe external URL -> Role DNA;
-- commercial packaging.
-
-### Phase E — Intelligence & Scale
-
-Parallel tracks:
-
-- Recruiter OS / CRM;
-- ATS/postback/webhook network;
-- Market & Salary Intelligence;
-- Skills/Career Graph;
-- Candidate Agent and candidate tools;
-- employer experience.
-
----
-
-## 21. Gates
-
-### G0 — Baseline
-
-Current Joboolo baseline/security integrity is stable enough to begin Talent Stream foundations.
+| Lot | Circle | Execution | Capability | Dependencies | Gate contribution |
+|---|---:|---|---|---|---|
+| **A0** | C1 | SEQ | Domain contracts, IDs, versioning, transaction boundaries | G0 | foundation contract |
+| **A1** | C1 | // | Candidate Professional Profile | A0 | Talent Graph v1 |
+| **A2** | C1 | // | Candidate Preferences + Discovery State | A0 | discovery/preferences |
+| **A3** | C1 | // | Role DNA + taxonomy | A0 | Role Graph v1 |
+| **A4** | C1 | after A3 | Opportunity Specification | A3 | Stream Requirement input |
+| **A5** | C1 | after A1+A3 | Explainable Match Engine v2 | A1+A3 | Candidate↔Role Match |
+| **A6** | C1 | after A2+A4 | Hard Eligibility / Opportunity Fit v1 | A2+A4 | compatibility guard |
+| **A7** | C1 | // | Organization/Company Verification | A0 | organization trust |
+| **A8** | C1 | after A7 | Recruiter Membership + Verification + Mandate | A7 | recruiter eligibility |
+| **A9** | C0/C1 | after A2+A8 | Authorization / Grant Engine | A2+A8 | current policy decisions |
+| **A10** | C1 | after A9 | Privacy Lifecycle | A9 | expiry/revoke/retention |
+| **A11** | C0 | // | Intent Event Contract + Provenance | A0 | Intent foundation |
+| **A12** | C1/C2 | // | Audit + Reason Codes | A0 | explainability/audit |
+| **A13** | C1 | // | Mongo migration/index strategy | A0 | schema safety |
+| **A14** | C1 | // | Async job/outbox/idempotency contract | A0 | worker safety |
 
 ### GA — Talent Engine & Trust Ready
 
-Requires, at minimum:
+GA requires enough of A0-A14 to safely support Phase B, including canonical profile/preferences/discovery, Role DNA/Opportunity Spec, explainable Match, organization/recruiter/mandate trust, authorization/privacy, preserved CV ACL, Intent/provenance contract, audit/versioning and migration safety.
 
-- canonical profile/preferences/discovery;
-- Role DNA and Opportunity Specification;
-- explainable Match;
-- organization/recruiter/mandate model;
-- grants/authorization;
-- privacy lifecycle;
-- CV ACL preserved;
-- intent contract/provenance;
-- audit/versioning.
+## Phase B — Talent Stream MVP
+
+| Lot | Circle | Execution | Capability | Dependencies |
+|---|---:|---|---|---|
+| **B1** | C0 | SEQ | Talent Stream Aggregate Root / lifecycle | GA |
+| **B2** | C0 | after B1 | Own-job Stream Requirement adapter | B1+A3+A4 |
+| **B3** | C0 | // | Application source adapter | B1 |
+| **B4** | C0 | // | “I’m interested” declared intent | B1+A11 |
+| **B5** | C0 | // | Explicitly shared favorite/interest | B1+A11 |
+| **B6** | C0 | // | Discovery Pool retrieval | B1+A2+A5+A6 |
+| **B7** | C0 | after B3-B6 | Stream candidate projection/read model | B3+B4+B5+B6 |
+| **B8** | C0/C1 | after B7 | Privacy-safe Anonymous Talent cards | B7+A10 |
+| **B9** | C0/C1 | after B7 | Contact Governor v1 | B7+A8+A9 |
+| **B10** | C0 | after B8+B9 | Contact Request Engine | B8+B9 |
+| **B11** | C0 | after B10 | Candidate invitation + accept/decline/ignore | B10 |
+| **B12** | C0/C1 | after B11 | Current authorization check + Grant Activation | B11+A9+A10 |
+| **B13** | C0 | after B12 | Progressive profile/identity reveal | B12 |
+| **B14** | C0 | after B12 | Specific CV grant/access path | B12 + existing ACL |
+| **B15** | C0 | after B12 | Messaging authorization adapter | B12 |
+| **B16** | C2 | // | Talent Stream Analytics v1 | B1 |
+
+Non-blocking multipliers such as Recommendations v2 or Kanban integration may run in parallel if they do not delay GB.
 
 ### GB — Talent Stream MVP Ready
 
-Requires end-to-end controlled flow from verified recruiter/own need through candidate retrieval, Contact Governor, candidate decision, grant, optional CV and messaging.
+Verified own-job Stream works end to end using Applications, Declared Interest, Shared Interest and Discovery Pool, with anonymous/privacy-safe exposure, Contact Governor, candidate decision, current authorization, optional CV grant and messaging. Recruiter-visible observed Cross-Offer is still disabled.
 
-No observed Cross-Offer behavior is recruiter-visible yet.
+## Phase C — Cross-Offer Intent & Moat
+
+| Lot | Circle | Capability | Dependencies |
+|---|---:|---|---|
+| **C1** | C1 | Role Similarity Engine | GB+A3 |
+| **C2** | C0/C1 | Role Clustering | C1 |
+| **C3** | C0 | Observed Intent Collection | GB+A11 |
+| **C4** | C0 | Job/Role/Company/Market Intent aggregation | C2+C3 |
+| **C5** | C0 | Cross-Offer Retrieval **INTERNAL ONLY** | C4+A5 |
+| **C6** | C1 | Independent Signal Rule | C5 |
+| **C7** | C1 | Origin Neutralization | C5 |
+| **C8** | C1 | Source Protection + configurable Window | C6+C7 |
+| **C9** | C1 | Cross-Offer Permission/Evidence Policy | C6+A9 |
+| **C10** | C0/C1 | Contact Governor v2 | C6+C8+C9 |
+| **C11** | C1 | Opportunity Fit v2 / richer constraints | C5+A6 |
+| **C12** | C2 | Salary Intelligence v1 | C11 |
+| **C13** | C2 | Semantic Search / Role Graph retrieval | C1 |
+| **C14** | C2 | Talent Rediscovery | C4 |
+| **C15** | C2 | Responsible AI Center v1 | C4+A12 |
+| **C16** | C0 | Cross-Offer Recruiter Projection **SAFE EXPOSURE** | C6+C7+C8+C9+C10+C11 |
 
 ### GC — Cross-Offer Safe & Effective
 
-Requires Role Clusters/Intent plus all source/privacy/trust/anti-spam safeguards before recruiter exposure.
+No recruiter-facing Cross-Offer exposure before C16 and all relevant safeguards. Exact competitor/source behavior remains internal.
+
+## Phase D — No-Posting Talent Stream
+
+| Lot | Circle | Capability | Dependencies |
+|---|---:|---|---|
+| **D1** | C0 | Own Job -> editable Stream template | GC |
+| **D2** | C0 | Other allowed Joboolo Job -> Role DNA model | GC |
+| **D3** | C2 | Natural Language Need -> Role DNA/Opportunity Spec | GC+A3+A4 |
+| **D4** | C0 | Common No-Posting Stream Wizard | D1+D2+D3 |
+| **D5** | C0 | Confidential Stream policy/UX | D4+A8+A9 |
+| **D6** | C2 | Market/Talent Availability Preview | C2+C4+D4 |
+| **D7** | C0/C2 | External URL -> safe Role DNA extraction | D4 |
+| **D8** | C2 | Talent Stream packaging/billing | D4+B16 |
+| **D9** | C3 | Reverse Marketplace v1 | D4 |
 
 ### GD — No-Posting Ready
 
-Own job, another allowed Joboolo job and natural language all converge to the same Stream Requirement and Talent Stream engine. External URL is layered safely.
+Own job, allowed reference Joboolo job and natural-language need converge to the same Stream Requirement and engine. External URL uses the same pipeline when enabled. Reference jobs transfer role semantics, never audience rights.
 
-### GE — Platform & Scale Ready
+## Phase E — Intelligence & Scale
 
-Integrations, observability, reliability, intelligence and ecosystem capabilities meet platform-grade requirements.
+Phase E is deliberately parallelized into tracks.
+
+### E1 — Recruiter OS
+
+- Mini ATS v2
+- CRM talent pools/nurturing
+- Structured interviews/scorecards
+- Scheduling/reminders
+- Rejection feedback
+- recruiter SLA/quality controls
+
+### E2 — External Recruitment Network
+
+- ATS postbacks
+- ATS/API/webhooks
+- ATS integrations
+- external apply attribution
+- status sync
+
+### E3 — Market & Data Intelligence
+
+- Market Intelligence v2
+- Salary Intelligence v2
+- Talent Availability
+- Recruiter Analytics
+- Quality-of-Hire
+- Talent Supply Forecast
+
+### E4 — Skills & Career Graph
+
+- Skills Passport
+- Micro-assessments / Proof-of-Skill
+- Skill Gap
+- Career Explorer
+- Train-to-Hire
+
+### E5 — Candidate Experience
+
+- Candidate Agent
+- CV Assistant
+- Interview Coach
+- WhatsApp/SMS/QR channels
+
+### E6 — Employer Experience
+
+- job-writing/compliance/salary copilot
+- enriched employer/company pages
+
+### GE — Talent Platform Ready
+
+Scale, integrations, observability, intelligence and ecosystem capabilities meet production/platform requirements without weakening the earlier Trust/Permission Gates.
 
 ---
 
-## 22. Dependency rules
+## 22. Parallel delivery lanes
 
-Preferred high-level dependency direction:
+Recommended permanent lanes once contracts are stable:
 
-```text
-profiles ──────┐
-roles ─────────┼──> matching ─────┐
-opportunities ─┘                  │
-                                  ├──> talent_stream
-intent ───────────────────────────┤
-trust ────────────────────────────┤
-permissions ──────────────────────┤
-privacy ──────────────────────────┘
+| Lane | Responsibility |
+|---|---|
+| **Lane 1 — Talent Engine** | Profile, Role DNA, Opportunity Spec, Match, Role Clusters |
+| **Lane 2 — Trust & Privacy** | Verification, mandates, permissions, exclusions, Source Protection, Contact Governor |
+| **Lane 3 — Product UX** | Candidate/recruiter Stream, invitations, progressive reveal, workflows |
+| **Lane 4 — Data & Intelligence** | Intent events, projections, workers, analytics, monitoring |
 
-analytics consumes domain events/read models but does not grant permissions.
-```
-
-Avoid circular dependencies such as:
-
-- `talent_stream -> permissions -> talent_stream`;
-- `talent_stream -> matching -> talent_stream`;
-- `trust -> talent_stream -> trust`.
-
-Use domain-neutral IDs/contracts/events where a dependency inversion is needed.
+Parallel work starts only after shared contracts/IDs are defined. Two lanes must not invent separate representations of Role DNA, Permission or Intent.
 
 ---
 
-## 23. Route/service rule
+## 23. Gate testing philosophy
 
-FastAPI route handlers should progressively become thin adapters.
+Gates are testable release conditions, not documentation labels.
 
-Do not place long-lived Talent Stream business policy directly inside HTTP route functions.
-
-Preferred separation:
+Examples of future policy tests:
 
 ```text
-route
-  ↓
-application/domain service
-  ↓
-policy / repository / domain model
+test_private_favorite_never_grants_sharing()
+test_click_alone_never_reveals_identity()
+test_discovery_and_intent_are_separate()
+test_current_employer_exclusion_blocks_contact()
+test_unverified_recruiter_cannot_request_intro()
+test_declined_intro_never_reveals_profile()
+test_cv_requires_exact_active_grant()
+test_cross_offer_never_exposes_source_job()
+test_source_protection_window_policy()
+test_contact_governor_prevents_duplicates_and_overcontact()
+test_talent_stream_opt_in_not_required_to_apply()
 ```
 
-This must be introduced incrementally; no global rewrite without a dedicated issue.
+If a Gate-critical test fails, the corresponding behavior must not be released.
 
 ---
 
-## 24. Development governance
+## 24. Strategic graph model
 
-All Talent Stream lots follow:
+Conceptually Talent Stream builds/reuses:
 
-```text
-GitHub issue
-  ↓
-OpenCode PLAN (read-only)
-  ↓
-ChatGPT architecture review
-  ↓
-OpenCode BUILD on workflow-owned branch
-  ↓
-Tests
-  ↓
-ChatGPT PR review
-  ↓
-Explicit merge decision
-```
+- Job Graph;
+- Role Graph;
+- Talent Graph;
+- Intent Graph.
 
-OpenCode must read `TALENT_STREAM_SPEC.md`, `ARCHITECTURE.md` and `BUSINESS_RULES.md` for all Talent Stream Phase A-E work.
+This is a conceptual data architecture, not a requirement to introduce a graph database. MongoDB remains valid while access patterns and scale justify it.
 
-The issue scope always wins over the broader roadmap: documentation explains the target system, but an agent must never implement a future phase merely because it is described here.
+---
+
+## 25. Architectural red lines
+
+Do not:
+
+- introduce microservices/Kafka without a dedicated approved architecture decision;
+- silently mutate existing Streams when source jobs change;
+- treat Discovery as Intent;
+- turn CPC click ledger into nominative Intent storage;
+- authorize from stale projections;
+- bypass CV ACL for employers/recruiters;
+- expose internal Cross-Offer retrieval before GC safeguards;
+- use an opaque LLM-only decision for canonical Match/Role Cluster/permission;
+- create separate Talent Stream engines for own jobs, reference jobs, external URLs and natural language;
+- implement cross-site surveillance as a shortcut;
+- create fake jobs for candidate harvesting.
+
+---
+
+## 26. Final architecture invariant
+
+> **Talent Stream orchestrates relevance; it does not manufacture permission.**
+
+The architecture must preserve separate sources of truth for professional relevance, opportunity compatibility, discovery/intent, recruiter trust, candidate permission and source protection throughout Phases A-E.
