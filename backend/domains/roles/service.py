@@ -38,6 +38,10 @@ class RoleDNAService:
         expected_version: EntityVersion,
         revision: RoleDNARevision,
     ) -> dict:
+        changes = self.repo.serialize_revision(revision)
+        if not changes:
+            raise ValueError("Role DNA revision must contain at least one business change")
+
         client = get_client()
         if client is None:
             raise RuntimeError("Mongo client unavailable")
@@ -54,7 +58,7 @@ class RoleDNAService:
                         )
                     next_version = int(expected_version) + 1
                     new_doc = dict(current)
-                    new_doc.update(self.repo.serialize_revision(revision))
+                    new_doc.update(changes)
                     new_doc["_id"] = f"{role_dna_id}:v{next_version}"
                     new_doc["version"] = next_version
                     new_doc["updated_at"] = now

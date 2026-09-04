@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from domains.roles.models import RoleDNA, RoleDNAStatus, RoleFactSource, RoleSkill
+from domains.roles.models import RoleDNA, RoleDNARevision, RoleDNAStatus, RoleFactSource, RoleSkill
 from domains.roles.repository import RoleDNARepository
 from domains.shared.ids import RoleDNAId
 from domains.shared.versioning import EntityVersion
@@ -49,6 +49,5 @@ def test_role_dna_version_is_positive():
         EntityVersion(0)
 
 
-def test_revision_serialization_does_not_add_opportunity_constraints():
-    allowed = set(RoleDNARepository.serialize_revision.__annotations__)
-    assert "salary_min" not in allowed
+def test_empty_revision_serializes_to_no_business_change():
+    assert RoleDNARepository.serialize_revision(RoleDNARevision()) == {}
