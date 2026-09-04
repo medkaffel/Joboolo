@@ -282,6 +282,18 @@ def test_overall_opportunity_fit_is_incompatible_when_any_component_is_incompati
     assert result.opportunity_fit_state is OpportunityFitState.INCOMPATIBLE
 
 
+def test_no_expressed_fit_constraints_is_not_applicable_not_false_compatible():
+    result = calculate_opportunity_fit(prefs(), opportunity(contract_types=(), industry_constraints=(), company_constraints=(), must_have_requirements=(), nice_to_have_requirements=()), computed_at=NOW)
+    assert result.opportunity_fit_state is OpportunityFitState.NOT_APPLICABLE
+    assert result.evidence_coverage == 100
+
+
+def test_explicit_opportunity_constraint_with_default_candidate_keeps_fit_unresolved():
+    result = calculate_opportunity_fit(prefs(), opportunity(work_arrangement=WorkArrangement.REMOTE), computed_at=NOW)
+    assert result.opportunity_fit_state is OpportunityFitState.UNRESOLVED
+    assert result.hard_eligibility_state is HardEligibilityState.UNRESOLVED
+
+
 def test_evidence_coverage_is_separate_from_hard_eligibility():
     result = calculate_opportunity_fit(
         prefs(work_mode=WorkMode.REMOTE), opportunity(work_arrangement=WorkArrangement.ONSITE), computed_at=NOW,
