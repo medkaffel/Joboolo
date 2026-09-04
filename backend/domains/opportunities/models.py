@@ -46,6 +46,8 @@ class CompensationConstraint:
     basis: Optional[CompensationBasis] = None
 
     def __post_init__(self) -> None:
+        if self.minimum is None and self.maximum is None:
+            raise ValueError("compensation constraint requires at least one amount")
         if self.minimum is not None and self.minimum < 0:
             raise ValueError("minimum compensation cannot be negative")
         if self.maximum is not None and self.maximum < 0:
@@ -66,12 +68,12 @@ class LocationConstraint:
     radius_km: Optional[int] = None
 
     def __post_init__(self) -> None:
+        if not self.locations:
+            raise ValueError("location constraint requires at least one target location")
         if any(not location.strip() for location in self.locations):
             raise ValueError("location entries cannot be empty")
         if self.radius_km is not None and self.radius_km < 0:
             raise ValueError("radius_km cannot be negative")
-        if self.radius_km is not None and not self.locations:
-            raise ValueError("radius_km requires at least one target location")
 
 
 @dataclass(frozen=True)
@@ -85,13 +87,15 @@ class OpportunitySpecification:
     compensation: Optional[CompensationConstraint] = None
     location: Optional[LocationConstraint] = None
     work_arrangement: Optional[WorkArrangement] = None
-    contract_types: Tuple[str, ...] = ()
+    # None means unknown/unspecified. An explicit empty tuple means the source
+    # deliberately declares no constraint for that dimension.
+    contract_types: Optional[Tuple[str, ...]] = None
     schedule: Optional[str] = None
     target_start: Optional[str] = None
-    industry_constraints: Tuple[str, ...] = ()
-    company_constraints: Tuple[str, ...] = ()
-    must_have_requirements: Tuple[str, ...] = ()
-    nice_to_have_requirements: Tuple[str, ...] = ()
+    industry_constraints: Optional[Tuple[str, ...]] = None
+    company_constraints: Optional[Tuple[str, ...]] = None
+    must_have_requirements: Optional[Tuple[str, ...]] = None
+    nice_to_have_requirements: Optional[Tuple[str, ...]] = None
 
     provenance: OpportunityFactSource = OpportunityFactSource.MANUAL
     source_job_id: Optional[JobId] = None
@@ -122,7 +126,7 @@ class OpportunitySpecification:
             self.must_have_requirements,
             self.nice_to_have_requirements,
         ):
-            if any(not value.strip() for value in values):
+            if values is not None and any(not value.strip() for value in values):
                 raise ValueError("opportunity constraint entries cannot be empty")
 
 
