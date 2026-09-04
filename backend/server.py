@@ -13,7 +13,7 @@ load_dotenv(ROOT_DIR / '.env')
 from database import connect_to_mongo, close_mongo_connection
 
 # Import routes
-from routes import auth, jobs, applications, companies, saved_jobs, alerts, files, admin, payments, geo, content, recruiter, ai, messages, analytics
+from routes import auth, jobs, applications, companies, saved_jobs, alerts, files, admin, payments, geo, content, recruiter, ai, messages, analytics, candidate_profiles
 
 # Create the main app without a prefix
 app = FastAPI(title="Joboolo API", version="1.0.0", redirect_slashes=False)
@@ -30,8 +30,13 @@ async def root():
 async def health_check():
     return {"status": "healthy", "service": "indeed-clone-api"}
 
+# A1 transitional façade MUST be registered before legacy auth so PUT /auth/me
+# has one runtime writer for candidate professional facts.
+api_router.include_router(candidate_profiles.compat_router)
+
 # Include all route modules
 api_router.include_router(auth.router)
+api_router.include_router(candidate_profiles.router)
 api_router.include_router(jobs.router)
 api_router.include_router(applications.router)
 api_router.include_router(companies.router)
