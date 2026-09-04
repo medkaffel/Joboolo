@@ -97,11 +97,14 @@ class FakeRepo:
         doc = self.events.get(command_id)
         return None if doc is None else dict(doc)
 
-    async def revoke_grant_if_unrevoked(self, grant_id, candidate_id, changes, session=None):
+    async def revoke_grant_if_unrevoked(self, grant_id, candidate_id, effective_at, changes, session=None):
         self.update_calls += 1
         self.update_session = session
         doc = self.grants.get(grant_id)
-        if doc is None or doc.get("candidate_id") != candidate_id or doc.get("revoked_at") is not None:
+        if doc is None or doc.get("candidate_id") != candidate_id:
+            return None
+        revoked_at = doc.get("revoked_at")
+        if revoked_at is not None and revoked_at <= effective_at:
             return None
         doc.update(changes)
         return dict(doc)
@@ -250,6 +253,17 @@ async def test_already_revoked_grant_keeps_original_revoked_at_without_new_event
     assert result.revoked_at == original
     assert svc.repo.update_calls == 0
     assert svc.repo.insert_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_future_scheduled_revocation_can_be_replaced_by_immediate_candidate_revocation():
+    scheduled = NOW + timedelta(hours=2)
+    svc, _ = service(); svc.repo.grants["g1"] = grant_doc(revoked_at=scheduled)
+    result = await svc.revoke_grant(candidate_command(command_id="revoke-now"), now=NOW)
+    assert result.revoked_at == NOW
+    assert svc.repo.update_calls == 1
+    assert svc.repo.insert_calls == 1
+    assert svc.repo.grants["g1"]["revocation_command_id"] == "revoke-now"
 
 
 @pytest.mark.asyncio
