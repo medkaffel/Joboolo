@@ -13,9 +13,16 @@ class PrivacyRepository:
     async def get_event_by_command_id(self, command_id: str, session=None) -> Optional[dict]:
         return await self.events.find_one({"command_id": command_id}, session=session)
 
-    async def revoke_grant_if_unrevoked(self, grant_id: str, candidate_id: str, changes: dict, session=None) -> Optional[dict]:
+    async def revoke_grant_if_unrevoked(self, grant_id: str, candidate_id: str, effective_at, changes: dict, session=None) -> Optional[dict]:
         result = await self.grants.update_one(
-            {"_id": grant_id, "candidate_id": candidate_id, "revoked_at": None},
+            {
+                "_id": grant_id,
+                "candidate_id": candidate_id,
+                "$or": [
+                    {"revoked_at": None},
+                    {"revoked_at": {"$gt": effective_at}},
+                ],
+            },
             {"$set": changes},
             session=session,
         )
