@@ -190,7 +190,7 @@ class PrivacyLifecycleService:
                             current = grant_from_document(current_doc)
                         except (KeyError, TypeError, ValueError) as exc:
                             raise PrivacyLifecycleConflictError("Concurrent grant state is invalid") from exc
-                        if current.revoked_at is not None:
+                        if current.revoked_at is not None and current.revoked_at <= now:
                             return current
                         raise PrivacyLifecycleConflictError("Concurrent grant revocation conflict")
                     await self.repo.insert_event(_event_document(command, now), session=session)
