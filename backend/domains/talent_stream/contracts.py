@@ -32,11 +32,12 @@ from domains.shared.versioning import (
 
 @dataclass(frozen=True)
 class DiscoveryState:
-    """Candidate-controlled discovery authorization, distinct from Intent.
+    """Candidate-controlled Discovery authorization, distinct from search state,
+    Intent and Permission.
 
-    Controls are deliberately orthogonal rather than a single mode: a candidate
-    may allow compatible opportunities while also requiring approval before
-    reveal/contact and/or remaining anonymous until a later grant.
+    Controls are deliberately orthogonal rather than a single mode. A candidate
+    may pause active job search while keeping Discovery enabled. Discovery alone
+    never authorizes identity, CV, contact or messaging access.
     """
 
     candidate_id: CandidateId
@@ -128,12 +129,23 @@ class GrantContract:
     revoked_at: Optional[datetime] = None
 
     def __post_init__(self) -> None:
+        if not self.scopes:
+            raise ValueError("grant requires at least one scope")
+        if len(set(self.scopes)) != len(self.scopes):
+            raise ValueError("grant scopes must be unique")
         if GrantScope.CV in self.scopes and self.document_id is None:
             raise ValueError("CV scope requires a specific document_id")
         if self.document_id is not None and GrantScope.CV not in self.scopes:
             raise ValueError("document_id is only valid for a CV-scoped grant")
+        if self.expires_at is not None and self.expires_at <= self.issued_at:
+            raise ValueError("grant expiry must be after issue time")
+        if self.revoked_at is not None and self.revoked_at < self.issued_at:
+            raise ValueError("grant revocation cannot predate issue time")
 
     def is_active_at(self, now: datetime) -> bool:
+        """Evaluate temporal validity from current data, never from TTL deletion."""
+        if now < self.issued_at:
+            return False
         if self.revoked_at is not None and self.revoked_at <= now:
             return False
         if self.expires_at is not None and self.expires_at <= now:
