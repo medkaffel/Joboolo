@@ -13,7 +13,7 @@ load_dotenv(ROOT_DIR / '.env')
 from database import connect_to_mongo, close_mongo_connection
 
 # Import routes
-from routes import auth, jobs, applications, companies, saved_jobs, alerts, files, admin, payments, geo, content, recruiter, ai, messages, analytics, candidate_profiles
+from routes import auth, jobs, applications, companies, saved_jobs, alerts, files, admin, payments, geo, content, recruiter, ai, messages, analytics, candidate_profiles, candidate_preferences
 
 # Create the main app without a prefix
 app = FastAPI(title="Joboolo API", version="1.0.0", redirect_slashes=False)
@@ -51,6 +51,7 @@ api_router.include_router(candidate_profiles.compat_router)
 # Include all route modules
 api_router.include_router(auth.router)
 api_router.include_router(candidate_profiles.router)
+api_router.include_router(candidate_preferences.router)
 api_router.include_router(jobs.router)
 api_router.include_router(applications.router)
 api_router.include_router(companies.router)
