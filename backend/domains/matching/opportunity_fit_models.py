@@ -56,6 +56,7 @@ class OpportunityFitReasonCode(str, Enum):
 class OpportunityFitComponent:
     dimension: OpportunityFitDimension
     state: OpportunityFitState
+    fit_relevant: bool
     hard_eligibility_relevant: bool
     reason_codes: Tuple[OpportunityFitReasonCode, ...]
     candidate_evidence: Tuple[str, ...] = ()
@@ -64,6 +65,8 @@ class OpportunityFitComponent:
     def __post_init__(self) -> None:
         if not self.reason_codes:
             raise ValueError("Opportunity Fit component requires at least one reason code")
+        if self.hard_eligibility_relevant and not self.fit_relevant:
+            raise ValueError("hard-eligibility component must also be fit-relevant")
         if self.state is OpportunityFitState.INCOMPATIBLE and not self.hard_eligibility_relevant:
             raise ValueError("incompatible component must be hard-eligibility relevant in A6 v1")
 
