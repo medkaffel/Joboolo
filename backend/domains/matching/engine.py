@@ -256,6 +256,12 @@ def _professional_text(profile: CandidateProfessionalProfile) -> str:
     return _norm(" ".join(chunks))
 
 
+def _contains_exact_phrase(corpus: str, phrase: str) -> bool:
+    if not corpus or not phrase:
+        return False
+    return bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", corpus))
+
+
 def _capabilities_component(
     profile: CandidateProfessionalProfile, role: RoleDNA
 ) -> MatchComponent:
@@ -268,7 +274,7 @@ def _capabilities_component(
     reasons = []
     for capability in role.capabilities:
         normalized = _norm(capability)
-        if normalized and normalized in corpus:
+        if _contains_exact_phrase(corpus, normalized):
             matched.append(f"capability:{capability}")
             reasons.append(MatchReasonCode.CAPABILITY_TEXT_EVIDENCE)
         else:
