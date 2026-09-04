@@ -16,6 +16,17 @@ async def main():
     client = AsyncIOMotorClient(url)
     db = client[db_name]
     try:
+        malformed = await db.candidate_preferences.find_one({
+            "$or": [
+                {"candidate_id": {"$exists": False}},
+                {"candidate_id": None},
+                {"version": {"$exists": False}},
+                {"version": None},
+            ]
+        })
+        if malformed:
+            raise SystemExit("malformed candidate_preferences detected; index not created")
+
         duplicates = await db.candidate_preferences.aggregate([
             {"$group": {"_id": "$candidate_id", "count": {"$sum": 1}}},
             {"$match": {"count": {"$gt": 1}}},
