@@ -88,6 +88,7 @@ class FakeRepo:
         self.insert_calls = 0
         self.update_session = None
         self.event_session = None
+        self.force_update_conflict = False
 
     async def get_grant(self, grant_id, session=None):
         doc = self.grants.get(grant_id)
@@ -104,6 +105,8 @@ class FakeRepo:
         if doc is None or doc.get("candidate_id") != candidate_id:
             return None
         revoked_at = doc.get("revoked_at")
+        if self.force_update_conflict:
+            return None
         if revoked_at is not None and revoked_at <= effective_at:
             return None
         doc.update(changes)
@@ -264,6 +267,16 @@ async def test_future_scheduled_revocation_can_be_replaced_by_immediate_candidat
     assert svc.repo.update_calls == 1
     assert svc.repo.insert_calls == 1
     assert svc.repo.grants["g1"]["revocation_command_id"] == "revoke-now"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_update_failure_with_only_future_revocation_fails_closed():
+    scheduled = NOW + timedelta(hours=2)
+    svc, _ = service(); svc.repo.grants["g1"] = grant_doc(revoked_at=scheduled)
+    svc.repo.force_update_conflict = True
+    with pytest.raises(PrivacyLifecycleConflictError):
+        await svc.revoke_grant(candidate_command(command_id="revoke-now"), now=NOW)
+    assert svc.repo.insert_calls == 0
 
 
 @pytest.mark.asyncio
