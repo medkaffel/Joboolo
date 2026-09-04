@@ -141,7 +141,7 @@ def _location_component(
         return _component(
             OpportunityFitDimension.LOCATION_MOBILITY,
             OpportunityFitState.UNRESOLVED,
-            hard=False,
+            hard=True,
             reasons=(OpportunityFitReasonCode.CANDIDATE_PREFERENCE_MISSING,),
             opportunity=_values("location", opportunity_locations),
         )
@@ -177,7 +177,7 @@ def _work_arrangement_component(
         return _component(
             OpportunityFitDimension.WORK_ARRANGEMENT,
             OpportunityFitState.UNRESOLVED,
-            hard=False,
+            hard=constraint is not None,
             reasons=(OpportunityFitReasonCode.CANDIDATE_DEFAULT_NOT_PROOF,),
             candidate=(f"work_mode:{candidate.value}",),
             opportunity=(
@@ -230,7 +230,7 @@ def _contract_component(
         return _component(
             OpportunityFitDimension.CONTRACT,
             OpportunityFitState.UNRESOLVED,
-            hard=False,
+            hard=opportunity_values is not None,
             reasons=(OpportunityFitReasonCode.CANDIDATE_DEFAULT_NOT_PROOF,),
             opportunity=(
                 ()
@@ -289,7 +289,7 @@ def _availability_component(
         return _component(
             OpportunityFitDimension.AVAILABILITY,
             OpportunityFitState.UNRESOLVED,
-            hard=False,
+            hard=True,
             reasons=(OpportunityFitReasonCode.CANDIDATE_PREFERENCE_MISSING,),
             opportunity=(f"target_start:{target}",),
         )
@@ -389,6 +389,22 @@ def _hard_eligibility(
     return HardEligibilityState.ELIGIBLE
 
 
+def _overall_fit(components: Sequence[OpportunityFitComponent]) -> OpportunityFitState:
+    if any(
+        component.state is OpportunityFitState.INCOMPATIBLE for component in components
+    ):
+        return OpportunityFitState.INCOMPATIBLE
+    if any(
+        component.state is OpportunityFitState.UNRESOLVED for component in components
+    ):
+        return OpportunityFitState.UNRESOLVED
+    if any(
+        component.state is OpportunityFitState.COMPATIBLE for component in components
+    ):
+        return OpportunityFitState.COMPATIBLE
+    return OpportunityFitState.NOT_APPLICABLE
+
+
 def _coverage(components: Sequence[OpportunityFitComponent]) -> int:
     considered = [
         component
@@ -451,6 +467,7 @@ def calculate_opportunity_fit(
         opportunity_spec_version=opportunity.version,
         engine_version=engine_version,
         hard_eligibility_state=_hard_eligibility(components),
+        opportunity_fit_state=_overall_fit(components),
         evidence_coverage=_coverage(components),
         components=components,
         computed_at=computed_at or datetime.now(timezone.utc),
