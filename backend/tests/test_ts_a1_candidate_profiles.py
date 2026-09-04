@@ -4,7 +4,7 @@ import pytest
 
 from domains.profiles.legacy import deterministic_profile_id, profile_from_legacy_user
 from domains.profiles.models import CandidateProfilePatch, FactSource, SkillFact
-from domains.profiles.repository import patch_to_mongo_set
+from domains.profiles.repository import CandidateProfileRepository, patch_to_mongo_set
 from domains.shared.versioning import EntityVersion
 
 
@@ -67,3 +67,28 @@ def test_patch_serialization_keeps_declared_source_and_no_hidden_fields():
 def test_entity_version_remains_strictly_positive_for_profiles():
     with pytest.raises(ValueError):
         EntityVersion(0)
+
+
+@pytest.mark.asyncio
+async def test_repository_update_is_optimistic_and_increments_exactly_once():
+    captured = {}
+
+    class FakeCollection:
+        async def find_one_and_update(self, query, update, **kwargs):
+            captured["query"] = query
+            captured["update"] = update
+            return {"candidate_id": "candidate-1", "version": 4}
+
+    class FakeDB:
+        candidate_profiles = FakeCollection()
+
+    repo = CandidateProfileRepository(FakeDB())
+    result = await repo.update_with_version(
+        "candidate-1",
+        EntityVersion(3),
+        CandidateProfilePatch(summary="Updated"),
+        datetime.now(timezone.utc),
+    )
+    assert captured["query"] == {"candidate_id": "candidate-1", "version": 3}
+    assert captured["update"]["$inc"] == {"version": 1}
+    assert result["version"] == 4
