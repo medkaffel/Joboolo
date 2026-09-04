@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from domains.matching.engine import MATCH_ENGINE_VERSION, calculate_professional_match
+from domains.matching.engine import MATCH_ENGINE_VERSION, WEIGHTS, calculate_professional_match
 from domains.matching.models import MatchDimension, MatchReasonCode, MatchState, ProfessionalMatchResult
 from domains.matching.service import MatchSnapshotUnavailableError, ProfessionalMatchService
 from domains.profiles.models import (
@@ -46,6 +46,43 @@ def role(**kwargs):
 
 def component(result, dimension):
     return next(value for value in result.components if value.dimension is dimension)
+
+
+def test_engine_weights_are_explicit_and_sum_to_one_hundred():
+    assert sum(WEIGHTS.values()) == 100
+
+
+def test_capability_matching_respects_term_boundaries():
+    result = calculate_professional_match(
+        profile(
+            occupations=(
+                OccupationFact(title="Backend Engineer", source=FactSource.CANDIDATE_DECLARED),
+            ),
+            summary="MongoDB platform engineer",
+        ),
+        role(capabilities=("Go",)),
+        computed_at=NOW,
+    )
+    capability = component(result, MatchDimension.CAPABILITIES)
+    assert capability.state is MatchState.UNKNOWN
+    assert capability.matched_evidence == ()
+
+
+def test_unsupported_experience_band_stays_unknown_not_gap():
+    result = calculate_professional_match(
+        profile(
+            occupations=(
+                OccupationFact(title="Backend Engineer", source=FactSource.CANDIDATE_DECLARED),
+            ),
+            experience_years=8,
+        ),
+        role(experience_band="expert confirmé"),
+        computed_at=NOW,
+    )
+    experience = component(result, MatchDimension.EXPERIENCE_SENIORITY)
+    assert experience.state is MatchState.UNKNOWN
+    assert experience.gaps == ()
+    assert MatchReasonCode.EXPERIENCE_BAND_UNSUPPORTED in experience.reason_codes
 
 
 def test_exact_professional_evidence_scores_full_when_fully_covered():
@@ -236,3 +273,68 @@ async def test_service_rejects_unavailable_historical_profile_version():
             candidate_profile_version=EntityVersion(2),
             computed_at=NOW,
         )
+
+
+@pytest.mark.asyncio
+async def test_service_reads_exact_requested_role_version():
+    captured = {}
+
+    class Profiles:
+        async def find_one(self, query, **kwargs):
+            return {
+                "_id": "candidate_profile:c1",
+                "candidate_id": "c1",
+                "version": 3,
+                "created_at": NOW,
+                "updated_at": NOW,
+                "occupations": [
+                    {
+                        "title": "Backend Engineer",
+                        "source": "candidate_declared",
+                        "normalized_occupation": None,
+                        "normalization_ref": None,
+                    }
+                ],
+                "experiences": [],
+                "skills": [],
+                "certifications": [],
+                "languages": [],
+                "industries": [],
+                "education": [],
+                "portfolio": [],
+            }
+
+    class Roles:
+        async def find_one(self, query, **kwargs):
+            captured["query"] = query
+            return {
+                "_id": "role:backend:v2",
+                "role_dna_id": "role:backend",
+                "version": 2,
+                "status": "active",
+                "canonical_title": "Backend Engineer",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "aliases": [],
+                "skills": [],
+                "capabilities": [],
+                "certifications": [],
+                "languages": [],
+                "transferable_role_refs": [],
+                "adjacent_role_refs": [],
+                "provenance": "manual",
+            }
+
+    class DB:
+        candidate_profiles = Profiles()
+        role_dnas = Roles()
+
+    result = await ProfessionalMatchService(DB()).compute(
+        CandidateId("c1"),
+        RoleDNAId("role:backend"),
+        EntityVersion(2),
+        candidate_profile_version=EntityVersion(3),
+        computed_at=NOW,
+    )
+    assert captured["query"] == {"role_dna_id": "role:backend", "version": 2}
+    assert result.role_dna_version == EntityVersion(2)
