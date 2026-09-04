@@ -54,6 +54,7 @@ async def main():
                 {"expires_at": {"$exists": True, "$ne": None, "$not": {"$type": "date"}}},
                 {"revoked_at": {"$exists": True, "$ne": None, "$not": {"$type": "date"}}},
                 {"document_id": {"$exists": True, "$ne": None, "$not": {"$type": "string"}}},
+                {"document_id": ""},
             ]
         })
         if malformed:
@@ -72,6 +73,31 @@ async def main():
         })
         if invalid_cv:
             raise SystemExit("invalid CV-scoped grants detected; indexes not created")
+
+        duplicate_scope = await grants.find_one({
+            "$expr": {
+                "$ne": [
+                    {"$size": "$scopes"},
+                    {"$size": {"$setUnion": ["$scopes", []]}},
+                ]
+            }
+        })
+        if duplicate_scope:
+            raise SystemExit("duplicate grant scopes detected; indexes not created")
+
+        invalid_expiry = await grants.find_one({
+            "expires_at": {"$type": "date"},
+            "$expr": {"$lte": ["$expires_at", "$issued_at"]},
+        })
+        if invalid_expiry:
+            raise SystemExit("invalid grant expiry detected; indexes not created")
+
+        invalid_revocation = await grants.find_one({
+            "revoked_at": {"$type": "date"},
+            "$expr": {"$lt": ["$revoked_at", "$issued_at"]},
+        })
+        if invalid_revocation:
+            raise SystemExit("invalid grant revocation detected; indexes not created")
 
         if await _duplicate_exists(grants, "$grant_id"):
             raise SystemExit("duplicate grant_id values detected; indexes not created")
