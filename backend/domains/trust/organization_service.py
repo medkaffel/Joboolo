@@ -19,6 +19,8 @@ from .organization_models import (
     normalize_domain,
     normalize_nonempty,
     normalize_optional_text,
+    organization_from_document,
+    require_aware_datetime,
 )
 from .organization_repository import OrganizationRepository
 
@@ -50,36 +52,13 @@ _SENSITIVE_IDENTITY_FIELDS = frozenset({
 })
 
 
+def _command_time(value: Optional[datetime], field_name: str) -> datetime:
+    current = value or datetime.now(timezone.utc)
+    return require_aware_datetime(current, field_name)
+
+
 def _enum_value(value):
     return value.value if hasattr(value, "value") else value
-
-
-def _organization_from_document(doc: dict) -> Organization:
-    return Organization(
-        organization_id=OrganizationId(doc["organization_id"]),
-        version=EntityVersion(int(doc["version"])),
-        legal_name=doc["legal_name"],
-        verification_state=OrganizationVerificationState(doc["verification_state"]),
-        created_at=doc["created_at"],
-        updated_at=doc["updated_at"],
-        display_name=doc.get("display_name"),
-        website_url=doc.get("website_url"),
-        primary_domain=doc.get("primary_domain"),
-        registration_country=doc.get("registration_country"),
-        registration_id=doc.get("registration_id"),
-        legacy_company_id=doc.get("legacy_company_id"),
-        verification_policy_version=(
-            None if doc.get("verification_policy_version") is None
-            else PolicyVersion(doc["verification_policy_version"])
-        ),
-        verification_reason_codes=tuple(
-            OrganizationVerificationReasonCode(value)
-            for value in doc.get("verification_reason_codes", [])
-        ),
-        verification_evidence_refs=tuple(doc.get("verification_evidence_refs", [])),
-        verification_actor_id=doc.get("verification_actor_id"),
-        verification_decided_at=doc.get("verification_decided_at"),
-    )
 
 
 def _identity_changes(current: dict, revision: OrganizationIdentityRevision) -> dict:
@@ -138,14 +117,14 @@ class OrganizationService:
         document = await self.repo.get(str(organization_id))
         if document is None:
             raise OrganizationInputNotFoundError("Organization not found")
-        return _organization_from_document(document)
+        return organization_from_document(document)
 
     async def create(self, command: OrganizationCreate, *, created_at: Optional[datetime] = None) -> Organization:
         identity = command.to_identity()
         if identity["legacy_company_id"] is not None:
             if not await self.repo.legacy_company_exists(identity["legacy_company_id"]):
                 raise OrganizationInputNotFoundError("legacy company mapping target not found")
-        now = created_at or datetime.now(timezone.utc)
+        now = _command_time(created_at, "created_at")
         document = {
             "_id": str(command.organization_id),
             "organization_id": str(command.organization_id),
@@ -164,7 +143,7 @@ class OrganizationService:
             await self.repo.insert(document)
         except DuplicateKeyError as exc:
             raise OrganizationConflictError("Organization identity already exists") from exc
-        return _organization_from_document(document)
+        return organization_from_document(document)
 
     async def revise_identity(
         self,
@@ -182,7 +161,7 @@ class OrganizationService:
         client = get_client()
         if client is None:
             raise RuntimeError("Mongo client unavailable")
-        now = occurred_at or datetime.now(timezone.utc)
+        now = _command_time(occurred_at, "occurred_at")
         try:
             async with await client.start_session() as session:
                 async with session.start_transaction():
@@ -193,11 +172,12 @@ class OrganizationService:
                         raise OrganizationConflictError(
                             f"organization version mismatch: expected {int(expected_version)}, current {current['version']}"
                         )
+                    current_org = organization_from_document(current)
                     changes = _identity_changes(current, revision)
                     if not changes:
                         raise ValueError("Organization identity revision requires a business change")
 
-                    current_legacy = current.get("legacy_company_id")
+                    current_legacy = current_org.legacy_company_id
                     requested_legacy = changes.get("legacy_company_id")
                     if current_legacy is not None and requested_legacy is not None and requested_legacy != current_legacy:
                         raise ValueError("legacy_company_id is immutable once attached")
@@ -205,7 +185,7 @@ class OrganizationService:
                         if not await self.repo.legacy_company_exists(requested_legacy, session=session):
                             raise OrganizationInputNotFoundError("legacy company mapping target not found")
 
-                    previous_state = OrganizationVerificationState(current["verification_state"])
+                    previous_state = current_org.verification_state
                     sensitive_changed = bool(_SENSITIVE_IDENTITY_FIELDS & set(changes))
                     event = None
                     if sensitive_changed and previous_state is not OrganizationVerificationState.UNVERIFIED:
@@ -240,7 +220,7 @@ class OrganizationService:
                         raise OrganizationConflictError("Organization changed concurrently")
                     if event is not None:
                         await self.repo.insert_event(event, session=session)
-                    return _organization_from_document(updated)
+                    return organization_from_document(updated)
         except DuplicateKeyError as exc:
             raise OrganizationConflictError("Organization identity conflicts with an existing organization") from exc
 
@@ -255,7 +235,7 @@ class OrganizationService:
         client = get_client()
         if client is None:
             raise RuntimeError("Mongo client unavailable")
-        now = occurred_at or datetime.now(timezone.utc)
+        now = _command_time(occurred_at, "occurred_at")
         try:
             async with await client.start_session() as session:
                 async with session.start_transaction():
@@ -266,7 +246,8 @@ class OrganizationService:
                         raise OrganizationConflictError(
                             f"organization version mismatch: expected {int(expected_version)}, current {current['version']}"
                         )
-                    previous_state = OrganizationVerificationState(current["verification_state"])
+                    current_org = organization_from_document(current)
+                    previous_state = current_org.verification_state
                     if transition.new_state not in _ALLOWED_TRANSITIONS[previous_state]:
                         raise ValueError(
                             f"invalid organization verification transition: {previous_state.value} -> {transition.new_state.value}"
@@ -300,6 +281,6 @@ class OrganizationService:
                         ),
                         session=session,
                     )
-                    return _organization_from_document(updated)
+                    return organization_from_document(updated)
         except DuplicateKeyError as exc:
             raise OrganizationConflictError("Organization verification transition conflicts; retry") from exc
