@@ -77,7 +77,7 @@ def test_work_mode_any_default_is_not_positive_proof():
         OpportunityFitDimension.WORK_ARRANGEMENT,
     )
     assert value.state is OpportunityFitState.UNRESOLVED
-    assert value.hard_eligibility_relevant is False
+    assert value.hard_eligibility_relevant is True
     assert OpportunityFitReasonCode.CANDIDATE_DEFAULT_NOT_PROOF in value.reason_codes
 
 
@@ -107,7 +107,7 @@ def test_empty_candidate_contract_default_is_not_positive_proof():
         calculate_opportunity_fit(prefs(), opportunity(contract_types=("CDI",)), computed_at=NOW),
         OpportunityFitDimension.CONTRACT,
     )
-    assert value.state is OpportunityFitState.UNRESOLVED and not value.hard_eligibility_relevant
+    assert value.state is OpportunityFitState.UNRESOLVED and value.hard_eligibility_relevant
 
 
 def test_explicit_empty_opportunity_contract_is_no_constraint():
@@ -263,6 +263,23 @@ def test_hard_eligible_when_all_hard_relevant_dimensions_are_resolved():
         ), computed_at=NOW,
     )
     assert result.hard_eligibility_state is HardEligibilityState.ELIGIBLE
+
+
+def test_overall_opportunity_fit_preserves_unresolved_even_without_hard_blocker():
+    result = calculate_opportunity_fit(
+        prefs(compensation=CompensationPreference(target=70000)),
+        opportunity(compensation=CompensationConstraint(maximum=90000), contract_types=()),
+        computed_at=NOW,
+    )
+    assert result.opportunity_fit_state is OpportunityFitState.UNRESOLVED
+
+
+def test_overall_opportunity_fit_is_incompatible_when_any_component_is_incompatible():
+    result = calculate_opportunity_fit(
+        prefs(work_mode=WorkMode.REMOTE),
+        opportunity(work_arrangement=WorkArrangement.ONSITE), computed_at=NOW,
+    )
+    assert result.opportunity_fit_state is OpportunityFitState.INCOMPATIBLE
 
 
 def test_evidence_coverage_is_separate_from_hard_eligibility():
