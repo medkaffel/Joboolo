@@ -49,5 +49,30 @@ def test_role_dna_version_is_positive():
         EntityVersion(0)
 
 
-def test_empty_revision_serializes_to_no_business_change():
-    assert RoleDNARepository.serialize_revision(RoleDNARevision()) == {}
+def test_revision_requires_explicit_version_provenance():
+    revision = RoleDNARevision(
+        version_provenance=RoleFactSource.MANUAL,
+        canonical_title="Senior Software Engineer",
+    )
+    serialized = RoleDNARepository.serialize_revision(revision)
+    assert serialized["version_provenance"] == "manual"
+    assert serialized["canonical_title"] == "Senior Software Engineer"
+
+
+def test_imported_or_suggested_revision_requires_provenance_ref():
+    with pytest.raises(ValueError):
+        RoleDNARevision(
+            version_provenance=RoleFactSource.SUGGESTED,
+            canonical_title="Software Engineer",
+        )
+
+
+def test_provenance_only_revision_has_no_business_change():
+    revision = RoleDNARevision(version_provenance=RoleFactSource.MANUAL)
+    serialized = RoleDNARepository.serialize_revision(revision)
+    business = {
+        key: value
+        for key, value in serialized.items()
+        if key not in {"version_provenance", "version_provenance_ref"}
+    }
+    assert business == {}
