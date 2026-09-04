@@ -35,6 +35,7 @@ def _component(
     dimension: OpportunityFitDimension,
     state: OpportunityFitState,
     *,
+    fit_relevant: bool,
     hard: bool,
     reasons: Sequence[OpportunityFitReasonCode],
     candidate: Sequence[str] = (),
@@ -43,6 +44,7 @@ def _component(
     return OpportunityFitComponent(
         dimension=dimension,
         state=state,
+        fit_relevant=fit_relevant,
         hard_eligibility_relevant=hard,
         reason_codes=tuple(dict.fromkeys(reasons)),
         candidate_evidence=tuple(candidate),
@@ -62,6 +64,7 @@ def _compensation_component(
         return _component(
             OpportunityFitDimension.COMPENSATION,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=False,
             hard=False,
             reasons=(
                 OpportunityFitReasonCode.SPEC_UNSPECIFIED,
@@ -77,6 +80,7 @@ def _compensation_component(
         return _component(
             OpportunityFitDimension.COMPENSATION,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=hard,
             reasons=(OpportunityFitReasonCode.SPEC_UNSPECIFIED,),
             candidate=evidence,
@@ -91,6 +95,7 @@ def _compensation_component(
         return _component(
             OpportunityFitDimension.COMPENSATION,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=False,
             reasons=(OpportunityFitReasonCode.CANDIDATE_PREFERENCE_MISSING,),
             opportunity=opportunity_evidence,
@@ -104,6 +109,7 @@ def _compensation_component(
         return _component(
             OpportunityFitDimension.COMPENSATION,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=hard,
             reasons=(OpportunityFitReasonCode.CURRENCY_NOT_COMPARABLE,),
             candidate=candidate_evidence,
@@ -112,6 +118,7 @@ def _compensation_component(
     return _component(
         OpportunityFitDimension.COMPENSATION,
         OpportunityFitState.UNRESOLVED,
+        fit_relevant=True,
         hard=hard,
         reasons=(OpportunityFitReasonCode.COMPENSATION_BASIS_UNAVAILABLE,),
         candidate=candidate_evidence,
@@ -132,6 +139,7 @@ def _location_component(
         return _component(
             OpportunityFitDimension.LOCATION_MOBILITY,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=bool(candidate_locations),
             hard=hard,
             reasons=(OpportunityFitReasonCode.SPEC_UNSPECIFIED,),
             candidate=_values("location", candidate_locations),
@@ -141,6 +149,7 @@ def _location_component(
         return _component(
             OpportunityFitDimension.LOCATION_MOBILITY,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.CANDIDATE_PREFERENCE_MISSING,),
             opportunity=_values("location", opportunity_locations),
@@ -151,6 +160,7 @@ def _location_component(
         return _component(
             OpportunityFitDimension.LOCATION_MOBILITY,
             OpportunityFitState.COMPATIBLE,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.EXACT_TEXT_MATCH,),
             candidate=_values("location", candidate_locations),
@@ -159,6 +169,7 @@ def _location_component(
     return _component(
         OpportunityFitDimension.LOCATION_MOBILITY,
         OpportunityFitState.UNRESOLVED,
+        fit_relevant=True,
         hard=True,
         reasons=(OpportunityFitReasonCode.GEO_NORMALIZATION_REQUIRED,),
         candidate=_values("location", candidate_locations),
@@ -177,6 +188,7 @@ def _work_arrangement_component(
         return _component(
             OpportunityFitDimension.WORK_ARRANGEMENT,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=constraint is not None,
             hard=constraint is not None,
             reasons=(OpportunityFitReasonCode.CANDIDATE_DEFAULT_NOT_PROOF,),
             candidate=(f"work_mode:{candidate.value}",),
@@ -188,6 +200,7 @@ def _work_arrangement_component(
         return _component(
             OpportunityFitDimension.WORK_ARRANGEMENT,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.SPEC_UNSPECIFIED,),
             candidate=(f"work_mode:{candidate.value}",),
@@ -196,6 +209,7 @@ def _work_arrangement_component(
         return _component(
             OpportunityFitDimension.WORK_ARRANGEMENT,
             OpportunityFitState.COMPATIBLE,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.EXPLICIT_MATCH,),
             candidate=(f"work_mode:{candidate.value}",),
@@ -204,6 +218,7 @@ def _work_arrangement_component(
     return _component(
         OpportunityFitDimension.WORK_ARRANGEMENT,
         OpportunityFitState.INCOMPATIBLE,
+        fit_relevant=True,
         hard=True,
         reasons=(OpportunityFitReasonCode.EXPLICIT_MISMATCH,),
         candidate=(f"work_mode:{candidate.value}",),
@@ -222,6 +237,7 @@ def _contract_component(
         return _component(
             OpportunityFitDimension.CONTRACT,
             OpportunityFitState.NOT_APPLICABLE,
+            fit_relevant=False,
             hard=False,
             reasons=(OpportunityFitReasonCode.EXPLICIT_NO_CONSTRAINT,),
             candidate=_values("contract", candidate_values),
@@ -230,6 +246,7 @@ def _contract_component(
         return _component(
             OpportunityFitDimension.CONTRACT,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=opportunity_values is not None,
             hard=opportunity_values is not None,
             reasons=(OpportunityFitReasonCode.CANDIDATE_DEFAULT_NOT_PROOF,),
             opportunity=(
@@ -242,6 +259,7 @@ def _contract_component(
         return _component(
             OpportunityFitDimension.CONTRACT,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.SPEC_UNSPECIFIED,),
             candidate=_values("contract", candidate_values),
@@ -252,6 +270,7 @@ def _contract_component(
         return _component(
             OpportunityFitDimension.CONTRACT,
             OpportunityFitState.COMPATIBLE,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.CONTRACT_OVERLAP,),
             candidate=_values("contract", candidate_values),
@@ -260,6 +279,7 @@ def _contract_component(
     return _component(
         OpportunityFitDimension.CONTRACT,
         OpportunityFitState.INCOMPATIBLE,
+        fit_relevant=True,
         hard=True,
         reasons=(OpportunityFitReasonCode.CONTRACT_NO_OVERLAP,),
         candidate=_values("contract", candidate_values),
@@ -279,6 +299,7 @@ def _availability_component(
         return _component(
             OpportunityFitDimension.AVAILABILITY,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=False,
             hard=False,
             reasons=(
                 OpportunityFitReasonCode.SPEC_UNSPECIFIED,
@@ -289,6 +310,7 @@ def _availability_component(
         return _component(
             OpportunityFitDimension.AVAILABILITY,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.CANDIDATE_PREFERENCE_MISSING,),
             opportunity=(f"target_start:{target}",),
@@ -297,6 +319,7 @@ def _availability_component(
         return _component(
             OpportunityFitDimension.AVAILABILITY,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.SPEC_UNSPECIFIED,),
             candidate=(f"availability:{candidate}",),
@@ -305,6 +328,7 @@ def _availability_component(
         return _component(
             OpportunityFitDimension.AVAILABILITY,
             OpportunityFitState.COMPATIBLE,
+            fit_relevant=True,
             hard=True,
             reasons=(OpportunityFitReasonCode.EXACT_TEXT_MATCH,),
             candidate=(f"availability:{candidate}",),
@@ -313,6 +337,7 @@ def _availability_component(
     return _component(
         OpportunityFitDimension.AVAILABILITY,
         OpportunityFitState.UNRESOLVED,
+        fit_relevant=True,
         hard=hard,
         reasons=(OpportunityFitReasonCode.FREE_TEXT_NOT_COMPARABLE,),
         candidate=(f"availability:{candidate}",),
@@ -328,12 +353,14 @@ def _unmapped_scalar_component(
         return _component(
             dimension,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=False,
             hard=False,
             reasons=(OpportunityFitReasonCode.SPEC_UNSPECIFIED,),
         )
     return _component(
         dimension,
         OpportunityFitState.UNRESOLVED,
+        fit_relevant=True,
         hard=True,
         reasons=(OpportunityFitReasonCode.NO_CANDIDATE_PREFERENCE_FIELD,),
         opportunity=(f"{dimension.value}:{value}",),
@@ -350,6 +377,7 @@ def _unmapped_list_component(
         return _component(
             dimension,
             OpportunityFitState.NOT_APPLICABLE,
+            fit_relevant=False,
             hard=False,
             reasons=(OpportunityFitReasonCode.EXPLICIT_NO_CONSTRAINT,),
         )
@@ -357,12 +385,14 @@ def _unmapped_list_component(
         return _component(
             dimension,
             OpportunityFitState.UNRESOLVED,
+            fit_relevant=False,
             hard=False,
             reasons=(OpportunityFitReasonCode.SPEC_UNSPECIFIED,),
         )
     return _component(
         dimension,
         OpportunityFitState.UNRESOLVED,
+        fit_relevant=True,
         hard=hard_if_present,
         reasons=(
             OpportunityFitReasonCode.NO_CANDIDATE_PREFERENCE_FIELD,
@@ -390,27 +420,24 @@ def _hard_eligibility(
 
 
 def _overall_fit(components: Sequence[OpportunityFitComponent]) -> OpportunityFitState:
+    relevant = [component for component in components if component.fit_relevant]
     if any(
-        component.state is OpportunityFitState.INCOMPATIBLE for component in components
+        component.state is OpportunityFitState.INCOMPATIBLE for component in relevant
     ):
         return OpportunityFitState.INCOMPATIBLE
     if any(
-        component.state is OpportunityFitState.UNRESOLVED for component in components
+        component.state is OpportunityFitState.UNRESOLVED for component in relevant
     ):
         return OpportunityFitState.UNRESOLVED
     if any(
-        component.state is OpportunityFitState.COMPATIBLE for component in components
+        component.state is OpportunityFitState.COMPATIBLE for component in relevant
     ):
         return OpportunityFitState.COMPATIBLE
     return OpportunityFitState.NOT_APPLICABLE
 
 
 def _coverage(components: Sequence[OpportunityFitComponent]) -> int:
-    considered = [
-        component
-        for component in components
-        if component.state is not OpportunityFitState.NOT_APPLICABLE
-    ]
+    considered = [component for component in components if component.fit_relevant]
     if not considered:
         return 100
     resolved = [
