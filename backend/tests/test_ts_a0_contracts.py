@@ -1,6 +1,8 @@
 from dataclasses import fields
 from datetime import datetime, timedelta
 
+import pytest
+
 from domains.shared.ids import (
     CandidateId,
     CandidatePreferencesId,
@@ -17,7 +19,6 @@ from domains.shared.versioning import ConsentPolicyVersion, EngineVersion, Entit
 from domains.talent_stream.contracts import (
     CandidatePreferencesRef,
     CandidateProfileRef,
-    DiscoveryMode,
     DiscoveryState,
     GrantContract,
     GrantScope,
@@ -33,16 +34,35 @@ from domains.talent_stream.events import IntentKind, IntentOrigin, TalentIntentE
 from domains.talent_stream.invariants import DATA_INVARIANTS, SEPARATION_INVARIANTS
 
 
-def test_discovery_state_is_explicit_and_distinct_from_intent():
+def test_discovery_state_is_explicit_composable_and_distinct_from_intent():
     state = DiscoveryState(
         candidate_id=CandidateId("candidate-1"),
-        mode=DiscoveryMode.COMPATIBLE_OPPORTUNITIES,
+        enabled=True,
+        allow_compatible_opportunities=True,
+        ask_before_reveal=True,
+        anonymous_only=True,
         preferences_version=EntityVersion(2),
         updated_at=datetime.utcnow(),
     )
     assert state.enabled is True
+    assert state.allow_compatible_opportunities is True
+    assert state.ask_before_reveal is True
+    assert state.anonymous_only is True
     assert "intent" not in {field.name for field in fields(DiscoveryState)}
     assert "discovery_is_not_intent" in SEPARATION_INVARIANTS
+
+
+def test_disabled_discovery_cannot_enable_subcontrols():
+    with pytest.raises(ValueError):
+        DiscoveryState(
+            candidate_id=CandidateId("candidate-1"),
+            enabled=False,
+            allow_compatible_opportunities=True,
+            ask_before_reveal=False,
+            anonymous_only=False,
+            preferences_version=EntityVersion(1),
+            updated_at=datetime.utcnow(),
+        )
 
 
 def test_role_dna_and_opportunity_spec_versions_are_pinned_separately():
@@ -91,6 +111,18 @@ def test_grant_scopes_keep_cv_distinct_and_expiry_denies_immediately():
     assert GrantScope.PROFILE_PREVIEW != GrantScope.CV
     assert grant.is_active_at(now) is False
     assert "ttl_cleanup_is_not_authorization" in DATA_INVARIANTS
+
+
+def test_cv_scope_requires_specific_document():
+    with pytest.raises(ValueError):
+        GrantContract(
+            grant_id=GrantId("grant-1"),
+            candidate_id=CandidateId("candidate-1"),
+            grantee_organization_id=OrganizationId("org-1"),
+            scopes=(GrantScope.CV,),
+            issued_at=datetime.utcnow(),
+            consent_policy_version=ConsentPolicyVersion("consent-v1"),
+        )
 
 
 def test_recruiter_context_distinguishes_requesting_org_hiring_company_and_mandate():
