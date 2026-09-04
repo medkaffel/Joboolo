@@ -30,8 +30,22 @@ async def root():
 async def health_check():
     return {"status": "healthy", "service": "indeed-clone-api"}
 
-# A1 transitional façade MUST be registered before legacy auth so PUT /auth/me
-# has one runtime writer for candidate professional facts.
+# TS-A1 progressive ownership transfer: remove exactly the legacy PUT /auth/me
+# route before including the auth router. The implementation remains in auth.py
+# temporarily, but it is not exposed at runtime/OpenAPI. Fail fast if that legacy
+# contract unexpectedly changes, rather than silently reintroducing two writers.
+_legacy_profile_update_routes = [
+    route for route in auth.router.routes
+    if getattr(route, "path", None) == "/auth/me"
+    and "PUT" in (getattr(route, "methods", set()) or set())
+]
+if len(_legacy_profile_update_routes) != 1:
+    raise RuntimeError(
+        "TS-A1 expected exactly one legacy PUT /auth/me route before ownership transfer"
+    )
+auth.router.routes.remove(_legacy_profile_update_routes[0])
+
+# A1 compatibility façade is now the only runtime PUT /auth/me writer.
 api_router.include_router(candidate_profiles.compat_router)
 
 # Include all route modules
