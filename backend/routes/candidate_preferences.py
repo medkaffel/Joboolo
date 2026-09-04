@@ -58,6 +58,12 @@ def _candidate_only(user: User):
         raise HTTPException(status_code=403, detail="Réservé aux candidats")
 
 
+def _provided(payload: BaseModel) -> set[str]:
+    if hasattr(payload, "model_fields_set"):
+        return set(payload.model_fields_set)
+    return set(payload.__fields_set__)
+
+
 @router.get("/me")
 async def get_preferences(current_user: User = Depends(get_current_active_user)):
     _candidate_only(current_user)
@@ -86,6 +92,10 @@ async def update_preferences(
     if_match: Optional[str] = Header(default=None, alias="If-Match"),
 ):
     _candidate_only(current_user)
+    provided = _provided(payload)
+    if not provided:
+        raise HTTPException(status_code=400, detail="At least one preference field is required")
+
     expected = None
     if if_match is not None:
         try:
@@ -93,20 +103,32 @@ async def update_preferences(
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid If-Match preferences version")
 
+    clearable = {
+        "compensation", "mobility", "availability",
+        "current_employer_company_id", "contact_frequency_preference",
+    }
+    clear_fields = frozenset(
+        key for key in clearable if key in provided and getattr(payload, key) is None
+    )
     patch = CandidatePreferencesPatch(
-        search_state=payload.search_state,
+        search_state=payload.search_state if "search_state" in provided else None,
         discovery=None if payload.discovery is None else DiscoverySettings(**payload.discovery.dict()),
-        target_roles=None if payload.target_roles is None else tuple(payload.target_roles),
+        target_roles=None if "target_roles" not in provided or payload.target_roles is None else tuple(payload.target_roles),
         compensation=None if payload.compensation is None else CompensationPreference(**payload.compensation.dict()),
         mobility=None if payload.mobility is None else MobilityPreference(
             locations=tuple(payload.mobility.locations), radius_km=payload.mobility.radius_km
         ),
-        work_mode=payload.work_mode,
-        contract_types=None if payload.contract_types is None else tuple(payload.contract_types),
-        availability=payload.availability,
-        excluded_company_ids=None if payload.excluded_company_ids is None else tuple(payload.excluded_company_ids),
-        current_employer_company_id=payload.current_employer_company_id,
-        contact_frequency_preference=payload.contact_frequency_preference,
+        work_mode=payload.work_mode if "work_mode" in provided else None,
+        contract_types=None if "contract_types" not in provided or payload.contract_types is None else tuple(payload.contract_types),
+        availability=payload.availability if "availability" in provided else None,
+        excluded_company_ids=None if "excluded_company_ids" not in provided or payload.excluded_company_ids is None else tuple(payload.excluded_company_ids),
+        current_employer_company_id=(
+            payload.current_employer_company_id if "current_employer_company_id" in provided else None
+        ),
+        contact_frequency_preference=(
+            payload.contact_frequency_preference if "contact_frequency_preference" in provided else None
+        ),
+        clear_fields=clear_fields,
     )
     db = await get_database()
     try:

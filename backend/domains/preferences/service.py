@@ -7,7 +7,7 @@ from database import get_client
 from domains.shared.ids import CandidatePreferencesId
 from domains.shared.versioning import EntityVersion
 from .models import CandidatePreferencesPatch
-from .repository import CandidatePreferencesRepository
+from .repository import CandidatePreferencesRepository, patch_to_set
 
 
 class PreferencesConflictError(RuntimeError):
@@ -64,10 +64,7 @@ class CandidatePreferencesService:
                             "created_at": now,
                             "updated_at": now,
                         }
-                        for key, value in patch.__dict__.items():
-                            if value is not None:
-                                from .repository import _serialize
-                                doc[key] = _serialize(value)
+                        doc.update(patch_to_set(patch))
                         return await self.repo.insert_initial(doc, session=session)
 
                     current_version = EntityVersion(int(current["version"]))

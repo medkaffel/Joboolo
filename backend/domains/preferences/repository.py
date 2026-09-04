@@ -13,7 +13,7 @@ def _serialize(value):
         return value.value
     if hasattr(value, "__dict__"):
         return {k: _serialize(v) for k, v in value.__dict__.items()}
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, frozenset)):
         return [_serialize(v) for v in value]
     return value
 
@@ -21,8 +21,12 @@ def _serialize(value):
 def patch_to_set(patch: CandidatePreferencesPatch) -> dict:
     out = {}
     for key, value in patch.__dict__.items():
+        if key == "clear_fields":
+            continue
         if value is not None:
             out[key] = _serialize(value)
+    for key in patch.clear_fields:
+        out[key] = None
     return out
 
 

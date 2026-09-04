@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
 from domains.shared.ids import CandidateId, CandidatePreferencesId
 from domains.shared.versioning import EntityVersion
@@ -86,6 +86,8 @@ class CandidatePreferences:
 
 @dataclass(frozen=True)
 class CandidatePreferencesPatch:
+    """Partial update where `clear_fields` distinguishes explicit null from absence."""
+
     search_state: Optional[SearchState] = None
     discovery: Optional[DiscoverySettings] = None
     target_roles: Optional[Tuple[str, ...]] = None
@@ -97,3 +99,12 @@ class CandidatePreferencesPatch:
     excluded_company_ids: Optional[Tuple[str, ...]] = None
     current_employer_company_id: Optional[str] = None
     contact_frequency_preference: Optional[str] = None
+    clear_fields: FrozenSet[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        clearable = {
+            "compensation", "mobility", "availability",
+            "current_employer_company_id", "contact_frequency_preference",
+        }
+        if not self.clear_fields.issubset(clearable):
+            raise ValueError("clear_fields contains a non-clearable preference")
