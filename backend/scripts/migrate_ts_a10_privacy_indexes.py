@@ -94,18 +94,31 @@ async def main():
         if malformed_revocation:
             raise SystemExit("malformed TS-A10 grant revocation metadata detected; indexes not created")
 
-        incomplete_a10_revocation = await grants.find_one({
-            "revocation_command_id": {"$exists": True},
-            "$or": [
-                {"revoked_at": None},
-                {"revocation_policy_version": {"$exists": False}},
-                {"revocation_reason_code": {"$exists": False}},
-                {"revocation_authority": {"$exists": False}},
-                {"revocation_actor_id": {"$exists": False}},
-                {"privacy_updated_at": {"$exists": False}},
-            ],
+        # Legacy/pre-A10 grants may legitimately have only revoked_at. Once any
+        # A10-specific metadata is present, however, the complete A10 audit bundle
+        # is mandatory so partial/tampered idempotency metadata cannot be indexed.
+        partial_a10_revocation = await grants.find_one({
+            "$and": [
+                {"$or": [
+                    {"revocation_command_id": {"$exists": True}},
+                    {"revocation_policy_version": {"$exists": True}},
+                    {"revocation_reason_code": {"$exists": True}},
+                    {"revocation_authority": {"$exists": True}},
+                    {"revocation_actor_id": {"$exists": True}},
+                    {"privacy_updated_at": {"$exists": True}},
+                ]},
+                {"$or": [
+                    {"revocation_command_id": {"$exists": False}},
+                    {"revocation_policy_version": {"$exists": False}},
+                    {"revocation_reason_code": {"$exists": False}},
+                    {"revocation_authority": {"$exists": False}},
+                    {"revocation_actor_id": {"$exists": False}},
+                    {"privacy_updated_at": {"$exists": False}},
+                    {"revoked_at": None},
+                ]},
+            ]
         })
-        if incomplete_a10_revocation:
+        if partial_a10_revocation:
             raise SystemExit("incomplete TS-A10 grant revocation metadata detected; indexes not created")
 
         invalid_revocation_authority = await grants.find_one({
