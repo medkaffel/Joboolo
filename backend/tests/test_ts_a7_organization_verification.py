@@ -10,7 +10,7 @@ from domains.trust.organization_models import (
     Organization, OrganizationCreate, OrganizationIdentityRevision,
     OrganizationVerificationReasonCode as Reason,
     OrganizationVerificationState as State,
-    OrganizationVerificationTransition,
+    OrganizationVerificationTransition, organization_from_document,
 )
 from domains.trust.organization_service import (
     OrganizationConflictError, OrganizationInputNotFoundError, OrganizationService,
@@ -18,6 +18,7 @@ from domains.trust.organization_service import (
 import domains.trust.organization_service as service_module
 
 NOW = datetime(2026, 9, 4, 20, 0, tzinfo=timezone.utc)
+NAIVE = NOW.replace(tzinfo=None)
 
 
 class Collection:
@@ -77,7 +78,8 @@ class DB:
         self.companies = Collection(companies)
 
 
-def doc(state='unverified', version=1, **extra):
+def doc(state='unverified', version=1, *, naive=False, **extra):
+    t = NAIVE if naive else NOW
     value = {
         '_id': 'org:acme', 'organization_id': 'org:acme', 'version': version,
         'legal_name': 'Acme SAS', 'display_name': 'Acme',
@@ -86,14 +88,20 @@ def doc(state='unverified', version=1, **extra):
         'legacy_company_id': None, 'verification_state': state,
         'verification_policy_version': None, 'verification_reason_codes': [],
         'verification_evidence_refs': [], 'verification_actor_id': None,
-        'verification_decided_at': None, 'created_at': NOW, 'updated_at': NOW,
+        'verification_decided_at': None, 'created_at': t, 'updated_at': t,
     }
     if state != 'unverified':
+        reasons = {
+            'pending': 'verification_requested',
+            'verified': 'legal_identity_confirmed',
+            'rejected': 'evidence_insufficient',
+            'suspended': 'manual_suspension',
+        }
         value.update(
             verification_policy_version='trust-v1',
-            verification_reason_codes=['verification_requested'],
+            verification_reason_codes=[reasons[state]],
             verification_evidence_refs=['evidence:1'] if state == 'verified' else [],
-            verification_actor_id='admin:1', verification_decided_at=NOW,
+            verification_actor_id='admin:1', verification_decided_at=t,
         )
     value.update(extra)
     return value
@@ -135,37 +143,51 @@ def test_identity_validation_and_normalization():
 
 
 def test_revision_uses_explicit_clear_semantics():
-    with pytest.raises(ValueError):
-        OrganizationIdentityRevision(registration_country='FR')
-    with pytest.raises(ValueError):
-        OrganizationIdentityRevision(clear_fields=frozenset({'registration_id'}))
-    with pytest.raises(ValueError):
-        OrganizationIdentityRevision(display_name='   ')
-    with pytest.raises(ValueError):
-        OrganizationIdentityRevision(clear_fields=frozenset({'legacy_company_id'}))
+    with pytest.raises(ValueError): OrganizationIdentityRevision(registration_country='FR')
+    with pytest.raises(ValueError): OrganizationIdentityRevision(clear_fields=frozenset({'registration_id'}))
+    with pytest.raises(ValueError): OrganizationIdentityRevision(display_name='   ')
+    with pytest.raises(ValueError): OrganizationIdentityRevision(clear_fields=frozenset({'legacy_company_id'}))
 
 
 def test_transition_contract_is_explainable_and_consistent():
     with pytest.raises(ValueError):
-        OrganizationVerificationTransition(
-            State.VERIFIED, (Reason.LEGAL_IDENTITY_CONFIRMED,), (), PolicyVersion('p1'), 'admin:1'
-        )
+        OrganizationVerificationTransition(State.VERIFIED, (Reason.LEGAL_IDENTITY_CONFIRMED,), (), PolicyVersion('p1'), 'admin:1')
     with pytest.raises(ValueError):
-        OrganizationVerificationTransition(
-            State.VERIFIED, (Reason.EVIDENCE_INSUFFICIENT,), ('e:1',), PolicyVersion('p1'), 'admin:1'
-        )
+        OrganizationVerificationTransition(State.VERIFIED, (Reason.EVIDENCE_INSUFFICIENT,), ('e:1',), PolicyVersion('p1'), 'admin:1')
     with pytest.raises(ValueError):
-        OrganizationVerificationTransition(
-            State.PENDING, (Reason.VERIFICATION_REQUESTED,), (), PolicyVersion(''), 'admin:1'
-        )
+        OrganizationVerificationTransition(State.PENDING, (Reason.VERIFICATION_REQUESTED,), (), PolicyVersion(''), 'admin:1')
+
+
+def test_persisted_reason_must_match_current_state():
+    bad = doc('verified', verification_reason_codes=['verification_requested'])
+    with pytest.raises(ValueError, match='reason codes are inconsistent'):
+        organization_from_document(bad)
+
+
+def test_initial_and_audited_unverified_shapes_are_distinct():
+    assert organization_from_document(doc()).verification_state is State.UNVERIFIED
+    partial = doc(verification_policy_version='trust-v1')
+    with pytest.raises(ValueError): organization_from_document(partial)
+    reset = doc(
+        verification_policy_version='trust-v2',
+        verification_reason_codes=['identity_changed_reverification_required'],
+        verification_actor_id='admin:1', verification_decided_at=NOW,
+    )
+    assert organization_from_document(reset).verification_reason_codes == (Reason.IDENTITY_CHANGED_REVERIFICATION_REQUIRED,)
+
+
+def test_persisted_identity_and_bson_datetime_are_rehydrated_fail_closed():
+    aware = organization_from_document(doc('verified', naive=True))
+    assert aware.created_at.tzinfo is not None and aware.created_at.utcoffset().total_seconds() == 0
+    mismatch = doc('verified'); mismatch['organization_id'] = 'org:other'
+    with pytest.raises(ValueError, match='identity mismatch'): organization_from_document(mismatch)
 
 
 @pytest.mark.asyncio
 async def test_create_starts_unverified_and_does_not_infer_membership():
     db = DB(companies=[{'_id': 'company:1', 'owner_id': 'user:1'}])
     result = await OrganizationService(db).create(
-        OrganizationCreate(OrganizationId('org:acme'), 'Acme SAS', legacy_company_id='company:1'),
-        created_at=NOW,
+        OrganizationCreate(OrganizationId('org:acme'), 'Acme SAS', legacy_company_id='company:1'), created_at=NOW,
     )
     assert result.version == 1 and result.verification_state is State.UNVERIFIED
     persisted = db.organizations.docs['org:acme']
@@ -175,21 +197,15 @@ async def test_create_starts_unverified_and_does_not_infer_membership():
 @pytest.mark.asyncio
 async def test_create_rejects_missing_or_duplicate_legacy_mapping_target():
     with pytest.raises(OrganizationInputNotFoundError):
-        await OrganizationService(DB()).create(
-            OrganizationCreate(OrganizationId('org:1'), 'Acme', legacy_company_id='missing'), created_at=NOW
-        )
+        await OrganizationService(DB()).create(OrganizationCreate(OrganizationId('org:1'), 'Acme', legacy_company_id='missing'), created_at=NOW)
     with pytest.raises(OrganizationConflictError):
-        await OrganizationService(DB(organizations=[doc()])).create(
-            OrganizationCreate(OrganizationId('org:acme'), 'Acme'), created_at=NOW
-        )
+        await OrganizationService(DB(organizations=[doc()])).create(OrganizationCreate(OrganizationId('org:acme'), 'Acme'), created_at=NOW)
 
 
 @pytest.mark.asyncio
 async def test_unverified_to_pending_updates_state_and_event_in_same_session(client):
     db = DB(organizations=[doc()])
-    result = await OrganizationService(db).transition_verification(
-        OrganizationId('org:acme'), EntityVersion(1), pending(), occurred_at=NOW
-    )
+    result = await OrganizationService(db).transition_verification(OrganizationId('org:acme'), EntityVersion(1), pending(), occurred_at=NOW)
     assert result.version == 2 and result.verification_state is State.PENDING
     event = next(iter(db.organization_verification_events.docs.values()))
     assert (event['previous_state'], event['new_state'], event['organization_version']) == ('unverified', 'pending', 2)
@@ -201,16 +217,12 @@ async def test_unverified_to_pending_updates_state_and_event_in_same_session(cli
 @pytest.mark.asyncio
 async def test_unverified_cannot_skip_pending(client):
     with pytest.raises(ValueError):
-        await OrganizationService(DB(organizations=[doc()])).transition_verification(
-            OrganizationId('org:acme'), EntityVersion(1), verified(), occurred_at=NOW
-        )
+        await OrganizationService(DB(organizations=[doc()])).transition_verification(OrganizationId('org:acme'), EntityVersion(1), verified(), occurred_at=NOW)
 
 
 @pytest.mark.asyncio
 async def test_pending_to_verified_requires_and_persists_evidence(client):
-    result = await OrganizationService(DB(organizations=[doc('pending', 2)])).transition_verification(
-        OrganizationId('org:acme'), EntityVersion(2), verified(), occurred_at=NOW
-    )
+    result = await OrganizationService(DB(organizations=[doc('pending', 2)])).transition_verification(OrganizationId('org:acme'), EntityVersion(2), verified(), occurred_at=NOW)
     assert result.verification_state is State.VERIFIED
     assert result.verification_evidence_refs == ('registry:1',)
 
@@ -218,23 +230,17 @@ async def test_pending_to_verified_requires_and_persists_evidence(client):
 @pytest.mark.asyncio
 async def test_rejected_can_resubmit_but_cannot_jump_directly_to_verified(client):
     db = DB(organizations=[doc('rejected', 3)])
-    result = await OrganizationService(db).transition_verification(
-        OrganizationId('org:acme'), EntityVersion(3), pending(), occurred_at=NOW
-    )
+    result = await OrganizationService(db).transition_verification(OrganizationId('org:acme'), EntityVersion(3), pending(), occurred_at=NOW)
     assert result.verification_state is State.PENDING
     with pytest.raises(ValueError):
-        await OrganizationService(DB(organizations=[doc('rejected', 3)])).transition_verification(
-            OrganizationId('org:acme'), EntityVersion(3), verified(), occurred_at=NOW
-        )
+        await OrganizationService(DB(organizations=[doc('rejected', 3)])).transition_verification(OrganizationId('org:acme'), EntityVersion(3), verified(), occurred_at=NOW)
 
 
 @pytest.mark.asyncio
 async def test_stale_version_fails_closed_without_event(client):
     db = DB(organizations=[doc(version=4)])
     with pytest.raises(OrganizationConflictError):
-        await OrganizationService(db).transition_verification(
-            OrganizationId('org:acme'), EntityVersion(3), pending(), occurred_at=NOW
-        )
+        await OrganizationService(db).transition_verification(OrganizationId('org:acme'), EntityVersion(3), pending(), occurred_at=NOW)
     assert not db.organization_verification_events.docs
 
 
@@ -273,10 +279,7 @@ async def test_sensitive_change_invalidates_pending_review(client):
 
 @pytest.mark.asyncio
 async def test_legacy_company_id_is_immutable_once_attached(client):
-    db = DB(
-        organizations=[doc(legacy_company_id='company:1')],
-        companies=[{'_id': 'company:1'}, {'_id': 'company:2'}],
-    )
+    db = DB(organizations=[doc(legacy_company_id='company:1')], companies=[{'_id': 'company:1'}, {'_id': 'company:2'}])
     with pytest.raises(ValueError):
         await OrganizationService(db).revise_identity(
             OrganizationId('org:acme'), EntityVersion(1), OrganizationIdentityRevision(legacy_company_id='company:2'),
@@ -287,8 +290,7 @@ async def test_legacy_company_id_is_immutable_once_attached(client):
 @pytest.mark.asyncio
 async def test_registration_identity_clear_revokes_verified_state(client):
     result = await OrganizationService(DB(organizations=[doc('verified', 3)])).revise_identity(
-        OrganizationId('org:acme'), EntityVersion(3),
-        OrganizationIdentityRevision(clear_fields=frozenset({'registration_country', 'registration_id'})),
+        OrganizationId('org:acme'), EntityVersion(3), OrganizationIdentityRevision(clear_fields=frozenset({'registration_country', 'registration_id'})),
         actor_id='admin:1', policy_version=PolicyVersion('trust-v2'), occurred_at=NOW,
     )
     assert result.registration_country is None and result.registration_id is None
