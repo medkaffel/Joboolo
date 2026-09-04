@@ -56,6 +56,8 @@ class RoleDNA:
     taxonomy_version: Optional[str] = None
     provenance: RoleFactSource = RoleFactSource.MANUAL
     source_job_id: Optional[str] = None
+    version_provenance: Optional[RoleFactSource] = None
+    version_provenance_ref: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.canonical_title.strip():
@@ -64,10 +66,14 @@ class RoleDNA:
             raise ValueError("updated_at cannot predate created_at")
         if self.provenance is RoleFactSource.SUGGESTED and not self.source_job_id:
             raise ValueError("suggested Role DNA requires source_job_id provenance")
+        if self.version_provenance in {RoleFactSource.IMPORTED, RoleFactSource.SUGGESTED} and not self.version_provenance_ref:
+            raise ValueError("imported/suggested Role DNA version requires version_provenance_ref")
 
 
 @dataclass(frozen=True)
 class RoleDNARevision:
+    version_provenance: RoleFactSource
+    version_provenance_ref: Optional[str] = None
     canonical_title: Optional[str] = None
     family_code: Optional[str] = None
     family_label: Optional[str] = None
@@ -82,3 +88,7 @@ class RoleDNARevision:
     adjacent_role_refs: Optional[Tuple[RoleDNAId, ...]] = None
     taxonomy_version: Optional[str] = None
     status: Optional[RoleDNAStatus] = None
+
+    def __post_init__(self) -> None:
+        if self.version_provenance in {RoleFactSource.IMPORTED, RoleFactSource.SUGGESTED} and not self.version_provenance_ref:
+            raise ValueError("imported/suggested revision requires version_provenance_ref")
