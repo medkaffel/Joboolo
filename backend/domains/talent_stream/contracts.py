@@ -30,23 +30,28 @@ from domains.shared.versioning import (
 )
 
 
-class DiscoveryMode(str, Enum):
-    DISABLED = "disabled"
-    COMPATIBLE_OPPORTUNITIES = "compatible_opportunities"
-    ASK_BEFORE_REVEAL = "ask_before_reveal"
-    ANONYMOUS_ONLY = "anonymous_only"
-
-
 @dataclass(frozen=True)
 class DiscoveryState:
+    """Candidate-controlled discovery authorization, distinct from Intent.
+
+    Controls are deliberately orthogonal rather than a single mode: a candidate
+    may allow compatible opportunities while also requiring approval before
+    reveal/contact and/or remaining anonymous until a later grant.
+    """
+
     candidate_id: CandidateId
-    mode: DiscoveryMode
+    enabled: bool
+    allow_compatible_opportunities: bool
+    ask_before_reveal: bool
+    anonymous_only: bool
     preferences_version: EntityVersion
     updated_at: datetime
 
-    @property
-    def enabled(self) -> bool:
-        return self.mode is not DiscoveryMode.DISABLED
+    def __post_init__(self) -> None:
+        if not self.enabled and (
+            self.allow_compatible_opportunities or self.ask_before_reveal or self.anonymous_only
+        ):
+            raise ValueError("disabled discovery cannot enable discovery sub-controls")
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,12 @@ class GrantContract:
     document_id: Optional[DocumentId] = None
     expires_at: Optional[datetime] = None
     revoked_at: Optional[datetime] = None
+
+    def __post_init__(self) -> None:
+        if GrantScope.CV in self.scopes and self.document_id is None:
+            raise ValueError("CV scope requires a specific document_id")
+        if self.document_id is not None and GrantScope.CV not in self.scopes:
+            raise ValueError("document_id is only valid for a CV-scoped grant")
 
     def is_active_at(self, now: datetime) -> bool:
         if self.revoked_at is not None and self.revoked_at <= now:
