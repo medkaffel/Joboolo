@@ -16,12 +16,14 @@ class RoleDNARepository:
     def __init__(self, db):
         self.collection = db.role_dnas
 
-    async def get(self, role_dna_id: str, version: int) -> Optional[dict]:
-        return await self.collection.find_one({"role_dna_id": role_dna_id, "version": version})
-
-    async def get_latest(self, role_dna_id: str) -> Optional[dict]:
+    async def get(self, role_dna_id: str, version: int, session=None) -> Optional[dict]:
         return await self.collection.find_one(
-            {"role_dna_id": role_dna_id}, sort=[("version", -1)]
+            {"role_dna_id": role_dna_id, "version": version}, session=session
+        )
+
+    async def get_latest(self, role_dna_id: str, session=None) -> Optional[dict]:
+        return await self.collection.find_one(
+            {"role_dna_id": role_dna_id}, sort=[("version", -1)], session=session
         )
 
     async def insert_version(self, doc: dict, session=None) -> dict:

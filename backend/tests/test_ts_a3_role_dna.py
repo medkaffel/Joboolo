@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from domains.roles.models import RoleDNA, RoleDNAStatus, RoleFactSource, RoleSkill
+from domains.roles.repository import RoleDNARepository
 from domains.shared.ids import RoleDNAId
 from domains.shared.versioning import EntityVersion
 
@@ -46,3 +47,8 @@ def test_normalized_skill_keeps_normalization_reference():
 def test_role_dna_version_is_positive():
     with pytest.raises(ValueError):
         EntityVersion(0)
+
+
+def test_revision_serialization_does_not_add_opportunity_constraints():
+    allowed = set(RoleDNARepository.serialize_revision.__annotations__)
+    assert "salary_min" not in allowed
