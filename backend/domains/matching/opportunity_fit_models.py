@@ -76,6 +76,7 @@ class OpportunityFitResult:
     opportunity_spec_version: EntityVersion
     engine_version: EngineVersion
     hard_eligibility_state: HardEligibilityState
+    opportunity_fit_state: OpportunityFitState
     evidence_coverage: int
     components: Tuple[OpportunityFitComponent, ...]
     computed_at: datetime
