@@ -96,6 +96,19 @@ async def update_preferences(
     if not provided:
         raise HTTPException(status_code=400, detail="At least one preference field is required")
 
+    non_nullable = {
+        "search_state", "discovery", "target_roles", "work_mode",
+        "contract_types", "excluded_company_ids",
+    }
+    null_non_nullable = [
+        key for key in non_nullable if key in provided and getattr(payload, key) is None
+    ]
+    if null_non_nullable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preference fields cannot be null: {', '.join(sorted(null_non_nullable))}",
+        )
+
     expected = None
     if if_match is not None:
         try:
@@ -113,15 +126,15 @@ async def update_preferences(
     patch = CandidatePreferencesPatch(
         search_state=payload.search_state if "search_state" in provided else None,
         discovery=None if payload.discovery is None else DiscoverySettings(**payload.discovery.dict()),
-        target_roles=None if "target_roles" not in provided or payload.target_roles is None else tuple(payload.target_roles),
+        target_roles=None if "target_roles" not in provided else tuple(payload.target_roles or []),
         compensation=None if payload.compensation is None else CompensationPreference(**payload.compensation.dict()),
         mobility=None if payload.mobility is None else MobilityPreference(
             locations=tuple(payload.mobility.locations), radius_km=payload.mobility.radius_km
         ),
         work_mode=payload.work_mode if "work_mode" in provided else None,
-        contract_types=None if "contract_types" not in provided or payload.contract_types is None else tuple(payload.contract_types),
+        contract_types=None if "contract_types" not in provided else tuple(payload.contract_types or []),
         availability=payload.availability if "availability" in provided else None,
-        excluded_company_ids=None if "excluded_company_ids" not in provided or payload.excluded_company_ids is None else tuple(payload.excluded_company_ids),
+        excluded_company_ids=None if "excluded_company_ids" not in provided else tuple(payload.excluded_company_ids or []),
         current_employer_company_id=(
             payload.current_employer_company_id if "current_employer_company_id" in provided else None
         ),
