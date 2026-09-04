@@ -18,12 +18,10 @@ compat_router = APIRouter(tags=["candidate-profile-compat"])
 
 class SkillInput(BaseModel):
     name: str
-    normalized_name: Optional[str] = None
 
 
 class OccupationInput(BaseModel):
     title: str
-    normalized_occupation: Optional[str] = None
 
 
 class CandidateProfileUpdate(BaseModel):
@@ -69,6 +67,12 @@ def _user_response(doc: dict) -> UserResponse:
     )
 
 
+def _provided_payload(payload: BaseModel) -> dict:
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(exclude_unset=True)
+    return payload.dict(exclude_unset=True)
+
+
 @router.get("/me")
 async def get_candidate_profile(current_user: User = Depends(get_current_active_user)):
     _candidate_only(current_user)
@@ -87,6 +91,9 @@ async def update_candidate_profile(
     if_match: Optional[str] = Header(default=None, alias="If-Match"),
 ):
     _candidate_only(current_user)
+    provided = _provided_payload(payload)
+    if not provided or not any(value is not None for value in provided.values()):
+        raise HTTPException(status_code=400, detail="At least one professional profile field is required")
     if if_match is None:
         raise HTTPException(status_code=428, detail="If-Match profile version required")
     try:
@@ -95,11 +102,11 @@ async def update_candidate_profile(
         raise HTTPException(status_code=400, detail="Invalid If-Match profile version")
 
     skills = None if payload.skills is None else tuple(
-        SkillFact(name=item.name, normalized_name=item.normalized_name, source=FactSource.CANDIDATE_DECLARED)
+        SkillFact(name=item.name, source=FactSource.CANDIDATE_DECLARED)
         for item in payload.skills
     )
     occupations = None if payload.occupations is None else tuple(
-        OccupationFact(title=item.title, normalized_occupation=item.normalized_occupation, source=FactSource.CANDIDATE_DECLARED)
+        OccupationFact(title=item.title, source=FactSource.CANDIDATE_DECLARED)
         for item in payload.occupations
     )
     patch = CandidateProfilePatch(
@@ -126,19 +133,28 @@ async def update_current_user_compat(
     """A1 compatibility façade preserving the legacy endpoint contract.
 
     Candidate professional fields have one logical writer (`ProfileService`).
-    Non-candidate users retain the previous users-only behavior unchanged.
+    Identity/photo/social-only edits do not create or version a professional
+    profile. Non-candidate users retain the previous users-only behavior.
     """
     db = await get_database()
     raw = {k: v for k, v in update_data.dict().items() if v is not None}
 
     if current_user.user_type != UserType.CANDIDATE:
-        raw["updated_at"] = datetime.utcnow()
-        await db.users.update_one({"_id": current_user.id}, {"$set": raw})
+        if raw:
+            raw["updated_at"] = datetime.utcnow()
+            await db.users.update_one({"_id": current_user.id}, {"$set": raw})
         updated_user = await db.users.find_one({"_id": current_user.id})
         return _user_response(updated_user)
 
     professional_keys = {"bio", "location", "skills", "experience_years"}
     professional = {k: raw.pop(k) for k in list(raw) if k in professional_keys}
+    if not professional:
+        if raw:
+            raw["updated_at"] = datetime.utcnow()
+            await db.users.update_one({"_id": current_user.id}, {"$set": raw})
+        updated_user = await db.users.find_one({"_id": current_user.id})
+        return _user_response(updated_user)
+
     patch = ProfileService.legacy_patch(
         bio=professional.get("bio"), location=professional.get("location"),
         experience_years=professional.get("experience_years"), skills=professional.get("skills"),
