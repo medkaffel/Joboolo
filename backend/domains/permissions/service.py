@@ -84,23 +84,32 @@ class PermissionService:
         require_aware_datetime(now, "evaluated_at")
 
         preferences_document = await self.repo.get_candidate_preferences(str(context.candidate_id))
+        state = None
         if preferences_document is None:
-            return self._deny(PermissionReasonCode.CANDIDATE_PREFERENCES_NOT_FOUND, now)
-        try:
-            state = candidate_permission_state_from_document(preferences_document)
-        except (KeyError, TypeError, ValueError):
-            return self._deny(PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID, now)
-        if str(state.candidate_id) != str(context.candidate_id):
-            return self._deny(PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID, now)
+            # A2 treats absence as the unmaterialized default state. It cannot
+            # authorize Discovery, but it must not invalidate an explicit scoped
+            # grant that may later be created by B12 after candidate acceptance.
+            if context.action is PermissionAction.REQUEST_INTRODUCTION:
+                return self._deny(PermissionReasonCode.CANDIDATE_PREFERENCES_NOT_FOUND, now)
+        else:
+            try:
+                state = candidate_permission_state_from_document(preferences_document)
+            except (KeyError, TypeError, ValueError):
+                return self._deny(PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID, now)
+            if str(state.candidate_id) != str(context.candidate_id):
+                return self._deny(PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID, now)
 
         requesting_id = str(context.recruiting_actor.requesting_organization_id)
         hiring_id = str(context.recruiting_actor.hiring_company_id)
         requesting = await self._organization_identity(requesting_id)
         if requesting is None:
+            evidence = () if state is None else (
+                f"candidate_preferences:{state.preferences_id}:v{state.preferences_version}",
+            )
             return self._deny(
                 PermissionReasonCode.ORGANIZATION_EXCLUSION_CONTEXT_UNRESOLVED,
                 now,
-                (f"candidate_preferences:{state.preferences_id}:v{state.preferences_version}",),
+                evidence,
             )
         if hiring_id == requesting_id:
             hiring = requesting
@@ -108,23 +117,31 @@ class PermissionService:
         else:
             hiring = await self._organization_identity(hiring_id)
             if hiring is None:
+                evidence = () if state is None else (
+                    f"candidate_preferences:{state.preferences_id}:v{state.preferences_version}",
+                )
                 return self._deny(
                     PermissionReasonCode.ORGANIZATION_EXCLUSION_CONTEXT_UNRESOLVED,
                     now,
-                    (f"candidate_preferences:{state.preferences_id}:v{state.preferences_version}",),
+                    evidence,
                 )
             organizations = (requesting, hiring)
 
-        evidence = [f"candidate_preferences:{state.preferences_id}:v{state.preferences_version}"]
+        evidence = []
+        if state is not None:
+            evidence.append(f"candidate_preferences:{state.preferences_id}:v{state.preferences_version}")
         evidence.extend(
             f"organization:{organization.organization_id}:v{organization.version}"
             for organization in organizations
         )
-        exclusion_reason = evaluate_organization_exclusions(state, organizations)
-        if exclusion_reason is not None:
-            return self._deny(exclusion_reason, now, evidence)
+        if state is not None:
+            exclusion_reason = evaluate_organization_exclusions(state, organizations)
+            if exclusion_reason is not None:
+                return self._deny(exclusion_reason, now, evidence)
 
         if context.action is PermissionAction.REQUEST_INTRODUCTION:
+            # Missing preferences returned above, so Discovery always evaluates
+            # a real current A2 document here.
             return evaluate_discovery_permission(
                 state,
                 policy_version=self.policy_version,
