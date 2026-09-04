@@ -1,13 +1,14 @@
 """Nominal identifier contracts for Talent Stream domain boundaries.
 
-Runtime values remain strings to preserve compatibility with the existing MongoDB
-schema. NewType prevents accidental conceptual mixing in typed code without
-changing persisted identifiers.
+Runtime identifiers remain strings to preserve compatibility with the existing
+MongoDB schema. NewType prevents accidental conceptual mixing in typed code
+without changing persisted identifier representation.
 """
 from typing import NewType
 
 UserId = NewType("UserId", str)
 CandidateId = NewType("CandidateId", str)
+PseudonymousCandidateId = NewType("PseudonymousCandidateId", str)
 OrganizationId = NewType("OrganizationId", str)
 RecruiterUserId = NewType("RecruiterUserId", str)
 HiringCompanyId = NewType("HiringCompanyId", str)
@@ -23,7 +24,11 @@ IntentEventId = NewType("IntentEventId", str)
 ContactRequestId = NewType("ContactRequestId", str)
 GrantId = NewType("GrantId", str)
 DocumentId = NewType("DocumentId", str)
+JobId = NewType("JobId", str)
+CampaignId = NewType("CampaignId", str)
 
+IntentEventType = NewType("IntentEventType", str)
+IntentSourceType = NewType("IntentSourceType", str)
 IdempotencyKey = NewType("IdempotencyKey", str)
 CorrelationId = NewType("CorrelationId", str)
 CausationId = NewType("CausationId", str)
