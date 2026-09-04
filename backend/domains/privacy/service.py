@@ -165,7 +165,7 @@ class PrivacyLifecycleService:
                         raise PrivacyLifecycleEligibilityError("Grant record is invalid") from exc
                     if str(grant.candidate_id) != str(command.candidate_id):
                         raise PrivacyLifecycleEligibilityError("Grant does not belong to candidate")
-                    if grant.revoked_at is not None:
+                    if grant.revoked_at is not None and grant.revoked_at <= now:
                         return grant
                     if now < grant.issued_at:
                         raise PrivacyLifecycleConflictError("Grant cannot be revoked before issuance")
@@ -180,7 +180,7 @@ class PrivacyLifecycleService:
                         "privacy_updated_at": now,
                     }
                     updated_doc = await self.repo.revoke_grant_if_unrevoked(
-                        str(command.grant_id), str(command.candidate_id), changes, session=session
+                        str(command.grant_id), str(command.candidate_id), now, changes, session=session
                     )
                     if updated_doc is None:
                         current_doc = await self.repo.get_grant(str(command.grant_id), session=session)
