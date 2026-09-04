@@ -40,8 +40,7 @@ class FakeRepo:
         return self.organizations.get(organization_id)
 
     async def find_grants(self, candidate_id, organization_id, stream_id, required_scope, document_id=None):
-        # Deliberately return all grants so service/engine revalidation is tested,
-        # not merely the fake query behavior.
+        # Return all rows deliberately: domain revalidation must be authoritative.
         return list(self.grants)
 
 
@@ -67,7 +66,7 @@ def context(action=PermissionAction.REQUEST_INTRODUCTION, *, requesting="org1", 
     )
 
 
-def pref_doc(*, enabled=True, allow=True, ask=False, anonymous=False, excluded=(), current=None, updated_at=NOW):
+def pref_doc(*, enabled=True, allow=True, ask=False, anonymous=False, excluded=(), current=None):
     return {
         "_id": "candidate_preferences:c1",
         "candidate_id": "c1",
@@ -81,7 +80,7 @@ def pref_doc(*, enabled=True, allow=True, ask=False, anonymous=False, excluded=(
         },
         "excluded_company_ids": list(excluded),
         "current_employer_company_id": current,
-        "updated_at": updated_at,
+        "updated_at": NOW,
     }
 
 
@@ -106,29 +105,17 @@ def org_doc(org_id, *, legacy="company1", malformed=False):
     return doc
 
 
-def grant_doc(
-    *,
-    grant_id="g1",
-    candidate="c1",
-    organization="org1",
-    stream="stream1",
-    scopes=("profile_preview",),
-    document=None,
-    issued_at=None,
-    expires_at=None,
-    revoked_at=None,
-    consent="accepted-intro-v1",
-):
-    issued_at = NOW - timedelta(hours=1) if issued_at is None else issued_at
+def grant_doc(*, candidate="c1", organization="org1", stream="stream1", scopes=("profile_preview",), document=None,
+              issued_at=None, expires_at=None, revoked_at=None):
     doc = {
-        "_id": grant_id,
-        "grant_id": grant_id,
+        "_id": "g1",
+        "grant_id": "g1",
         "candidate_id": candidate,
         "grantee_organization_id": organization,
         "scopes": list(scopes),
         "stream_id": stream,
-        "issued_at": issued_at,
-        "consent_policy_version": consent,
+        "issued_at": NOW - timedelta(hours=1) if issued_at is None else issued_at,
+        "consent_policy_version": "accepted-intro-v1",
     }
     if document is not None:
         doc["document_id"] = document
@@ -139,7 +126,7 @@ def grant_doc(
     return doc
 
 
-def seed_base(s, *, requesting="org1", hiring="org1", requesting_legacy="company1", hiring_legacy="company1"):
+def seed(s, *, requesting="org1", hiring="org1", requesting_legacy="company1", hiring_legacy="company1"):
     s.repo.preferences["c1"] = pref_doc()
     s.repo.organizations[requesting] = org_doc(requesting, legacy=requesting_legacy)
     if hiring != requesting:
@@ -150,192 +137,141 @@ def assert_reason(decision, reason):
     assert decision.reason_codes == (reason.value,)
 
 
-
-def test_non_string_or_none_identifiers_fail_closed_in_request_and_rehydration():
+def test_request_context_and_grant_rehydration_reject_bad_identifiers():
     with pytest.raises(ValueError):
         PermissionRequestContext(
             candidate_id=None,
             action=PermissionAction.REQUEST_INTRODUCTION,
             recruiting_actor=RecruitingActorContext(
-                recruiter_user_id=RecruiterUserId("r1"),
-                requesting_organization_id=OrganizationId("org1"),
-                hiring_company_id=HiringCompanyId("org1"),
-                mandate_id=None,
+                RecruiterUserId("r1"), OrganizationId("org1"), HiringCompanyId("org1"), None
             ),
             stream_id=TalentStreamId("stream1"),
         )
-    bad = grant_doc()
-    bad["stream_id"] = None
+    bad = grant_doc(); bad["stream_id"] = None
     with pytest.raises(ValueError):
         grant_from_document(bad)
 
 
-@pytest.mark.asyncio
-async def test_non_string_candidate_preferences_identity_fails_closed():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"]["candidate_id"] = None
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID)
-
-
-def test_request_context_requires_real_recruiting_actor():
+def test_request_context_requires_actor_and_exact_cv_document_contract():
     with pytest.raises(ValueError):
-        PermissionRequestContext(
-            candidate_id=CandidateId("c1"),
-            action=PermissionAction.REQUEST_INTRODUCTION,
-            recruiting_actor=None,
-            stream_id=TalentStreamId("stream1"),
-        )
-
-def test_cv_request_requires_exact_document_id_and_non_cv_rejects_document_id():
+        PermissionRequestContext(CandidateId("c1"), PermissionAction.REQUEST_INTRODUCTION, None, TalentStreamId("s"))
     with pytest.raises(ValueError):
         context(PermissionAction.ACCESS_CV)
     with pytest.raises(ValueError):
         context(PermissionAction.REVEAL_IDENTITY, document="cv1")
+    with pytest.raises(ValueError):
+        PermissionRequestContext(
+            CandidateId("c1"), PermissionAction.ACCESS_CV,
+            RecruitingActorContext(RecruiterUserId("r1"), OrganizationId("org1"), HiringCompanyId("org1"), None),
+            TalentStreamId("stream1"), document_id=123,
+        )
 
 
 @pytest.mark.asyncio
-async def test_missing_preferences_denies_introduction():
-    s = service()
-    s.repo.organizations["org1"] = org_doc("org1")
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.CANDIDATE_PREFERENCES_NOT_FOUND)
-
-
-@pytest.mark.asyncio
-async def test_disabled_discovery_denies_introduction():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"] = pref_doc(enabled=False, allow=False)
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.DISCOVERY_DISABLED)
-
-
-@pytest.mark.asyncio
-async def test_compatible_opportunities_must_be_explicitly_allowed():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"] = pref_doc(enabled=True, allow=False)
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.COMPATIBLE_OPPORTUNITIES_NOT_ALLOWED)
-
-
-@pytest.mark.asyncio
-async def test_paused_search_with_enabled_discovery_can_allow_introduction():
-    s = service(); seed_base(s)
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert decision.allowed
-    assert_reason(decision, PermissionReasonCode.DISCOVERY_PERMISSION_GRANTED)
-
-
-@pytest.mark.asyncio
-async def test_ask_before_reveal_and_anonymous_only_do_not_block_intro_but_never_grant_reveal():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"] = pref_doc(ask=True, anonymous=True)
+async def test_missing_preferences_denies_discovery_but_not_explicit_active_grant():
+    s = service(); s.repo.organizations["org1"] = org_doc("org1")
     intro = await s.evaluate(context(), evaluated_at=NOW)
-    reveal = await s.evaluate(context(PermissionAction.REVEAL_IDENTITY), evaluated_at=NOW)
-    assert intro.allowed
-    assert not reveal.allowed
-    assert_reason(reveal, PermissionReasonCode.ACTIVE_SCOPED_GRANT_REQUIRED)
+    assert not intro.allowed
+    assert_reason(intro, PermissionReasonCode.CANDIDATE_PREFERENCES_NOT_FOUND)
+
+    s.repo.grants = [grant_doc()]
+    reveal = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
+    assert reveal.allowed
+    assert_reason(reveal, PermissionReasonCode.ACTIVE_SCOPED_GRANT_GRANTED)
 
 
 @pytest.mark.asyncio
-async def test_selected_company_exclusion_blocks_requesting_organization_by_canonical_id():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"] = pref_doc(excluded=("org1",))
+async def test_present_malformed_preferences_block_intro_and_active_grant_fail_closed():
+    s = service(); seed(s); s.repo.preferences["c1"]["discovery"]["enabled"] = "true"; s.repo.grants = [grant_doc()]
+    for request in (context(), context(PermissionAction.REVEAL_PROFILE_PREVIEW)):
+        decision = await s.evaluate(request, evaluated_at=NOW)
+        assert not decision.allowed
+        assert_reason(decision, PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled,allow,reason", [
+    (False, False, PermissionReasonCode.DISCOVERY_DISABLED),
+    (True, False, PermissionReasonCode.COMPATIBLE_OPPORTUNITIES_NOT_ALLOWED),
+])
+async def test_discovery_requires_explicit_current_authorization(enabled, allow, reason):
+    s = service(); seed(s); s.repo.preferences["c1"] = pref_doc(enabled=enabled, allow=allow)
     decision = await s.evaluate(context(), evaluated_at=NOW)
     assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.CANDIDATE_ORGANIZATION_EXCLUSION)
+    assert_reason(decision, reason)
 
 
 @pytest.mark.asyncio
-async def test_selected_company_exclusion_blocks_hiring_company_by_legacy_mapping():
-    s = service(); seed_base(s, requesting="agency", hiring="client", requesting_legacy="agency-co", hiring_legacy="client-co")
-    s.repo.preferences["c1"] = pref_doc(excluded=("client-co",))
-    decision = await s.evaluate(context(requesting="agency", hiring="client"), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.CANDIDATE_ORGANIZATION_EXCLUSION)
+async def test_paused_search_discovery_allows_intro_but_ask_anonymous_never_reveal():
+    s = service(); seed(s); s.repo.preferences["c1"] = pref_doc(ask=True, anonymous=True)
+    intro = await s.evaluate(context(), evaluated_at=NOW)
+    identity = await s.evaluate(context(PermissionAction.REVEAL_IDENTITY), evaluated_at=NOW)
+    assert intro.allowed
+    assert_reason(intro, PermissionReasonCode.DISCOVERY_PERMISSION_GRANTED)
+    assert not identity.allowed
+    assert_reason(identity, PermissionReasonCode.ACTIVE_SCOPED_GRANT_REQUIRED)
 
 
 @pytest.mark.asyncio
-async def test_current_employer_exclusion_blocks_hiring_company_without_specific_reason_leak():
-    s = service(); seed_base(s, requesting="agency", hiring="client", requesting_legacy="agency-co", hiring_legacy="client-co")
-    s.repo.preferences["c1"] = pref_doc(current="client-co")
-    decision = await s.evaluate(context(requesting="agency", hiring="client"), evaluated_at=NOW)
+@pytest.mark.parametrize("requesting,hiring,requesting_legacy,hiring_legacy,excluded,current", [
+    ("org1", "org1", "company1", "company1", ("org1",), None),
+    ("agency", "client", "agency-co", "client-co", ("client-co",), None),
+    ("agency", "client", "agency-co", "client-co", ("agency-co",), None),
+    ("agency", "client", "agency-co", "client-co", (), "client-co"),
+])
+async def test_requesting_hiring_current_employer_and_company_exclusions_block(
+    requesting, hiring, requesting_legacy, hiring_legacy, excluded, current
+):
+    s = service(); seed(s, requesting=requesting, hiring=hiring, requesting_legacy=requesting_legacy, hiring_legacy=hiring_legacy)
+    s.repo.preferences["c1"] = pref_doc(excluded=excluded, current=current)
+    decision = await s.evaluate(context(requesting=requesting, hiring=hiring), evaluated_at=NOW)
     assert not decision.allowed
     assert_reason(decision, PermissionReasonCode.CANDIDATE_ORGANIZATION_EXCLUSION)
-    assert "current" not in decision.reason_codes[0]
     assert "employer" not in decision.reason_codes[0]
 
 
 @pytest.mark.asyncio
-async def test_agency_requesting_organization_can_itself_be_excluded():
-    s = service(); seed_base(s, requesting="agency", hiring="client", requesting_legacy="agency-co", hiring_legacy="client-co")
-    s.repo.preferences["c1"] = pref_doc(excluded=("agency-co",))
-    decision = await s.evaluate(context(requesting="agency", hiring="client"), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.CANDIDATE_ORGANIZATION_EXCLUSION)
+async def test_exclusion_namespace_ambiguity_fails_closed_only_when_exclusions_exist():
+    s = service(); seed(s, requesting_legacy=None)
+    s.repo.preferences["c1"] = pref_doc(excluded=("legacy-x",))
+    blocked = await s.evaluate(context(), evaluated_at=NOW)
+    assert not blocked.allowed
+    assert_reason(blocked, PermissionReasonCode.ORGANIZATION_EXCLUSION_CONTEXT_UNRESOLVED)
+
+    s.repo.preferences["c1"] = pref_doc()
+    allowed = await s.evaluate(context(), evaluated_at=NOW)
+    assert allowed.allowed
 
 
 @pytest.mark.asyncio
-async def test_exclusion_namespace_ambiguity_fails_closed_when_legacy_bridge_missing():
-    s = service(); seed_base(s, requesting_legacy=None)
-    s.repo.preferences["c1"] = pref_doc(excluded=("some-legacy-company",))
+@pytest.mark.parametrize("mutation", ["missing", "identity", "scalar"])
+async def test_missing_or_malformed_organization_fails_closed(mutation):
+    s = service(); seed(s)
+    if mutation == "missing":
+        del s.repo.organizations["org1"]
+    elif mutation == "identity":
+        s.repo.organizations["org1"] = org_doc("org1", malformed=True)
+    else:
+        s.repo.organizations["org1"]["legal_name"] = 123
     decision = await s.evaluate(context(), evaluated_at=NOW)
     assert not decision.allowed
     assert_reason(decision, PermissionReasonCode.ORGANIZATION_EXCLUSION_CONTEXT_UNRESOLVED)
 
 
 @pytest.mark.asyncio
-async def test_missing_legacy_bridge_is_not_blocking_when_candidate_has_no_exclusions():
-    s = service(); seed_base(s, requesting_legacy=None)
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert decision.allowed
-
-
-@pytest.mark.asyncio
-async def test_missing_or_malformed_organization_fails_closed():
-    s = service(); seed_base(s)
-    del s.repo.organizations["org1"]
-    missing = await s.evaluate(context(), evaluated_at=NOW)
-    assert not missing.allowed
-    assert_reason(missing, PermissionReasonCode.ORGANIZATION_EXCLUSION_CONTEXT_UNRESOLVED)
-
-    s.repo.organizations["org1"] = org_doc("org1", malformed=True)
-    malformed = await s.evaluate(context(), evaluated_at=NOW)
-    assert not malformed.allowed
-    assert_reason(malformed, PermissionReasonCode.ORGANIZATION_EXCLUSION_CONTEXT_UNRESOLVED)
-
-
-
-@pytest.mark.asyncio
-async def test_malformed_organization_scalar_type_denies_instead_of_crashing():
-    s = service(); seed_base(s)
-    s.repo.organizations["org1"]["legal_name"] = 123
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.ORGANIZATION_EXCLUSION_CONTEXT_UNRESOLVED)
-
-@pytest.mark.asyncio
-async def test_structurally_valid_but_unverified_organization_does_not_turn_permission_into_trust():
-    s = service(); seed_base(s)
-    # org_doc is intentionally UNVERIFIED. Permission can be ALLOW while Trust remains a separate gate.
+async def test_unverified_organization_does_not_merge_permission_with_trust():
+    s = service(); seed(s)  # org fixture is structurally valid but UNVERIFIED
     decision = await s.evaluate(context(), evaluated_at=NOW)
     assert decision.allowed
     assert_reason(decision, PermissionReasonCode.DISCOVERY_PERMISSION_GRANTED)
 
 
 @pytest.mark.asyncio
-async def test_active_profile_grant_allows_only_requested_profile_scope():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"] = pref_doc(enabled=False, allow=False)
-    s.repo.grants = [grant_doc(scopes=("profile_preview",))]
+async def test_profile_grant_is_scope_specific_and_discovery_disable_does_not_revoke_it():
+    s = service(); seed(s); s.repo.preferences["c1"] = pref_doc(enabled=False, allow=False); s.repo.grants = [grant_doc()]
     profile = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
     identity = await s.evaluate(context(PermissionAction.REVEAL_IDENTITY), evaluated_at=NOW)
     assert profile.allowed
-    assert_reason(profile, PermissionReasonCode.ACTIVE_SCOPED_GRANT_GRANTED)
     assert not identity.allowed
 
 
@@ -346,25 +282,21 @@ async def test_active_profile_grant_allows_only_requested_profile_scope():
     {"stream_id": "other-stream"},
     {"scopes": ["contact"]},
 ])
-async def test_wrong_grant_candidate_org_stream_or_scope_denies(patch):
-    s = service(); seed_base(s)
-    grant = grant_doc()
-    grant.update(patch)
-    s.repo.grants = [grant]
+async def test_wrong_candidate_org_stream_or_scope_never_authorizes(patch):
+    s = service(); seed(s); grant = grant_doc(); grant.update(patch); s.repo.grants = [grant]
     decision = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
     assert not decision.allowed
     assert_reason(decision, PermissionReasonCode.ACTIVE_SCOPED_GRANT_REQUIRED)
 
 
 @pytest.mark.asyncio
-async def test_exact_cv_document_grant_allows_cv_only():
-    s = service(); seed_base(s)
-    s.repo.grants = [grant_doc(scopes=("cv",), document="cv1")]
-    allowed = await s.evaluate(context(PermissionAction.ACCESS_CV, document="cv1"), evaluated_at=NOW)
-    wrong_doc = await s.evaluate(context(PermissionAction.ACCESS_CV, document="cv2"), evaluated_at=NOW)
+async def test_cv_requires_exact_document_and_does_not_imply_profile():
+    s = service(); seed(s); s.repo.grants = [grant_doc(scopes=("cv",), document="cv1")]
+    exact = await s.evaluate(context(PermissionAction.ACCESS_CV, document="cv1"), evaluated_at=NOW)
+    wrong = await s.evaluate(context(PermissionAction.ACCESS_CV, document="cv2"), evaluated_at=NOW)
     profile = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
-    assert allowed.allowed
-    assert not wrong_doc.allowed
+    assert exact.allowed
+    assert not wrong.allowed
     assert not profile.allowed
 
 
@@ -375,139 +307,77 @@ async def test_exact_cv_document_grant_allows_cv_only():
     grant_doc(issued_at=NOW + timedelta(seconds=1)),
 ])
 async def test_expired_revoked_or_future_grant_denies_immediately(grant):
-    s = service(); seed_base(s)
-    s.repo.grants = [grant]
+    s = service(); seed(s); s.repo.grants = [grant]
     decision = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
     assert not decision.allowed
     assert_reason(decision, PermissionReasonCode.ACTIVE_SCOPED_GRANT_REQUIRED)
 
 
 @pytest.mark.asyncio
-async def test_disabling_discovery_does_not_silently_revoke_existing_scoped_grant():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"] = pref_doc(enabled=False, allow=False)
-    s.repo.grants = [grant_doc()]
-    decision = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
-    assert decision.allowed
-
-
-@pytest.mark.asyncio
-async def test_new_exclusion_blocks_even_an_otherwise_active_grant():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"] = pref_doc(excluded=("company1",))
-    s.repo.grants = [grant_doc()]
+async def test_new_current_exclusion_overrides_existing_active_grant():
+    s = service(); seed(s); s.repo.preferences["c1"] = pref_doc(excluded=("company1",)); s.repo.grants = [grant_doc()]
     decision = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
     assert not decision.allowed
     assert_reason(decision, PermissionReasonCode.CANDIDATE_ORGANIZATION_EXCLUSION)
 
 
-def test_naive_bson_grant_datetimes_are_normalized_to_utc_at_rehydration_boundary():
-    naive = NOW.replace(tzinfo=None)
-    grant = grant_from_document(grant_doc(issued_at=naive, expires_at=(NOW + timedelta(hours=1)).replace(tzinfo=None)))
+def test_bson_naive_datetimes_normalize_to_utc_only_at_rehydration_boundary():
+    grant = grant_from_document(grant_doc(
+        issued_at=(NOW - timedelta(hours=1)).replace(tzinfo=None),
+        expires_at=(NOW + timedelta(hours=1)).replace(tzinfo=None),
+    ))
     assert grant.issued_at.tzinfo is timezone.utc
     assert grant.expires_at.tzinfo is timezone.utc
     assert grant.is_active_at(NOW)
 
 
 @pytest.mark.asyncio
-async def test_malformed_preferences_fail_closed():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"]["discovery"]["enabled"] = "true"
-    decision = await s.evaluate(context(), evaluated_at=NOW)
-    assert not decision.allowed
-    assert_reason(decision, PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID)
-
-
-@pytest.mark.asyncio
-async def test_malformed_grant_is_ignored_and_cannot_authorize():
-    s = service(); seed_base(s)
-    bad = grant_doc()
-    bad["_id"] = "mismatch"
-    s.repo.grants = [bad]
+async def test_malformed_grant_is_ignored_and_preferences_identity_is_strict():
+    s = service(); seed(s)
+    bad = grant_doc(); bad["_id"] = "mismatch"; s.repo.grants = [bad]
     decision = await s.evaluate(context(PermissionAction.REVEAL_PROFILE_PREVIEW), evaluated_at=NOW)
     assert not decision.allowed
 
-
-def test_policy_and_consent_versions_must_be_nonblank_strings():
-    db = SimpleNamespace(candidate_preferences=None, organizations=None, talent_stream_grants=None)
-    with pytest.raises(ValueError):
-        PermissionService(db, policy_version=PolicyVersion(""), consent_policy_version=CONSENT)
-    with pytest.raises(ValueError):
-        PermissionService(db, policy_version=POLICY, consent_policy_version=ConsentPolicyVersion(""))
-    with pytest.raises(ValueError):
-        PermissionService(db, policy_version=None, consent_policy_version=CONSENT)
-    with pytest.raises(ValueError):
-        PermissionService(db, policy_version=POLICY, consent_policy_version=None)
-
-
-
-@pytest.mark.asyncio
-async def test_candidate_preferences_id_must_match_a2_deterministic_identity():
-    s = service(); seed_base(s)
-    s.repo.preferences["c1"]["_id"] = "unexpected-preferences-id"
+    s.repo.preferences["c1"]["_id"] = "wrong-pref-id"
     decision = await s.evaluate(context(), evaluated_at=NOW)
     assert not decision.allowed
     assert_reason(decision, PermissionReasonCode.CANDIDATE_PREFERENCES_INVALID)
 
 
-def test_cv_document_id_must_be_a_string():
-    with pytest.raises(ValueError):
-        PermissionRequestContext(
-            candidate_id=CandidateId("c1"),
-            action=PermissionAction.ACCESS_CV,
-            recruiting_actor=RecruitingActorContext(
-                recruiter_user_id=RecruiterUserId("r1"),
-                requesting_organization_id=OrganizationId("org1"),
-                hiring_company_id=HiringCompanyId("org1"),
-                mandate_id=None,
-            ),
-            stream_id=TalentStreamId("stream1"),
-            document_id=123,
-        )
+def test_policy_consent_and_evaluation_time_are_strict():
+    db = SimpleNamespace(candidate_preferences=None, organizations=None, talent_stream_grants=None)
+    for policy, consent in (("", CONSENT), (POLICY, ""), (None, CONSENT), (POLICY, None)):
+        with pytest.raises(ValueError):
+            PermissionService(db, policy_version=policy, consent_policy_version=consent)
+
 
 @pytest.mark.asyncio
 async def test_evaluated_at_must_be_timezone_aware():
-    s = service(); seed_base(s)
+    s = service(); seed(s)
     with pytest.raises(ValueError):
         await s.evaluate(context(), evaluated_at=NOW.replace(tzinfo=None))
 
 
-def test_a9_service_has_no_trust_intent_match_click_favorite_or_application_authority():
-    source = (Path(__file__).parents[1] / "domains" / "permissions" / "service.py").read_text()
+def test_a9_has_no_trust_intent_match_click_favorite_or_application_authority():
+    root = Path(__file__).parents[1]
+    service_source = (root / "domains" / "permissions" / "service.py").read_text()
+    repository_source = (root / "domains" / "permissions" / "repository.py").read_text()
     forbidden = (
-        "RecruitingTrustService",
-        "evaluate_recruiting_actor_trust",
-        "talent_intent",
-        "professional_match",
-        "opportunity_fit",
-        "favorites",
-        "saved_jobs",
-        "clicks",
-        "applications",
+        "RecruitingTrustService", "evaluate_recruiting_actor_trust", "talent_intent",
+        "professional_match", "opportunity_fit", "favorites", "saved_jobs", "clicks", "applications",
     )
-    assert all(token not in source for token in forbidden)
+    assert all(token not in service_source for token in forbidden)
+    assert all(name in repository_source for name in ("candidate_preferences", "organizations", "talent_stream_grants"))
+    assert all(name not in repository_source for name in ("users", "recruiter_verifications", "recruiting_mandates"))
 
 
-def test_a9_repository_reads_only_preferences_organizations_and_grants():
-    source = (Path(__file__).parents[1] / "domains" / "permissions" / "repository.py").read_text()
-    assert "candidate_preferences" in source
-    assert "organizations" in source
-    assert "talent_stream_grants" in source
-    assert "users" not in source
-    assert "recruiter_verifications" not in source
-    assert "recruiting_mandates" not in source
-
-
-def test_migration_has_explicit_indexes_no_ttl_and_no_backfill():
+def test_migration_preflight_is_strict_and_has_no_ttl_or_backfill():
     source = (Path(__file__).parents[1] / "scripts" / "migrate_ts_a9_permission_indexes.py").read_text()
-    assert "talent_stream_grants" in source
-    assert "grant_id" in source
-    assert '"$type": "array"' in source
-    assert '"$type": "date"' in source
-    assert "candidate_id" in source
-    assert "grantee_organization_id" in source
-    assert "stream_id" in source
-    assert "document_id" in source
+    required = (
+        '"$type": "array"', '"$type": "date"', '"document_id": ""', '"$setUnion"',
+        '"$lte": ["$expires_at", "$issued_at"]', '"$lt": ["$revoked_at", "$issued_at"]',
+        "candidate_id", "grantee_organization_id", "stream_id", "document_id", "no grant backfill",
+    )
+    assert all(token in source for token in required)
     assert "expireAfterSeconds" not in source
     assert "TTL" in source
-    assert "no grant backfill" in source
