@@ -42,14 +42,22 @@ def test_opportunity_spec_contains_constraints_but_no_role_or_candidate_authorit
         assert forbidden not in fields
 
 
-def test_work_arrangement_can_remain_unspecified():
-    assert spec().work_arrangement is None
+def test_unknown_constraints_remain_explicitly_unspecified():
+    empty = spec()
+    assert empty.work_arrangement is None
+    assert empty.contract_types is None
+    assert empty.industry_constraints is None
+    assert empty.must_have_requirements is None
     assert spec(work_arrangement=WorkArrangement.REMOTE).work_arrangement is WorkArrangement.REMOTE
 
 
-def test_compensation_and_location_constraints_validate_ranges():
+def test_compensation_and_location_constraints_validate_ranges_and_empty_objects():
+    with pytest.raises(ValueError):
+        CompensationConstraint()
     with pytest.raises(ValueError):
         CompensationConstraint(minimum=70000, maximum=60000)
+    with pytest.raises(ValueError):
+        LocationConstraint()
     with pytest.raises(ValueError):
         LocationConstraint(radius_km=50)
     assert LocationConstraint(locations=("Paris",), radius_km=50).radius_km == 50
