@@ -12,6 +12,8 @@ from domains.opportunities.models import (
     WorkArrangement,
 )
 from domains.opportunities.repository import OpportunitySpecRepository
+from domains.opportunities.service import OpportunitySpecService
+import domains.opportunities.service as opportunity_service_module
 from domains.shared.ids import JobId, OpportunitySpecId
 from domains.shared.versioning import EntityVersion
 
@@ -107,3 +109,73 @@ def test_provenance_only_revision_has_no_business_change():
 def test_entity_version_remains_strictly_positive():
     with pytest.raises(ValueError):
         EntityVersion(0)
+
+
+@pytest.mark.asyncio
+async def test_revision_appends_new_version_without_mutating_previous(monkeypatch):
+    now = datetime.now(timezone.utc)
+    original = {
+        "_id": "opp:backend-1:v1",
+        "opportunity_spec_id": "opp:backend-1",
+        "version": 1,
+        "status": "draft",
+        "created_at": now,
+        "updated_at": now,
+        "work_arrangement": "remote",
+        "contract_types": ["CDI"],
+        "provenance": "manual",
+        "version_provenance": None,
+        "version_provenance_ref": None,
+    }
+
+    class Collection:
+        def __init__(self):
+            self.docs = [dict(original)]
+
+        async def find_one(self, query, sort=None, session=None):
+            matching = [
+                doc for doc in self.docs
+                if all(doc.get(key) == value for key, value in query.items())
+            ]
+            if sort:
+                matching.sort(key=lambda doc: doc["version"], reverse=True)
+            return dict(matching[0]) if matching else None
+
+        async def insert_one(self, doc, session=None):
+            self.docs.append(dict(doc))
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def start_transaction(self):
+            return self
+
+    class Client:
+        async def start_session(self):
+            return Session()
+
+    class DB:
+        opportunity_specs = Collection()
+
+    db = DB()
+    monkeypatch.setattr(opportunity_service_module, "get_client", lambda: Client())
+    revised = await OpportunitySpecService(db).revise(
+        OpportunitySpecId("opp:backend-1"),
+        EntityVersion(1),
+        OpportunitySpecRevision(
+            version_provenance=OpportunityFactSource.MANUAL,
+            clear_fields=frozenset({"work_arrangement"}),
+            contract_types=("CDD",),
+        ),
+    )
+
+    assert original["work_arrangement"] == "remote"
+    assert db.opportunity_specs.docs[0]["work_arrangement"] == "remote"
+    assert revised["version"] == 2
+    assert revised["work_arrangement"] is None
+    assert revised["contract_types"] == ["CDD"]
+    assert len(db.opportunity_specs.docs) == 2
