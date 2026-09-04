@@ -1,0 +1,1 @@
+"""Trust domain boundary marker (A7/A8/A10+)."""
