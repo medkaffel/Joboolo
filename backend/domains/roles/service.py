@@ -38,8 +38,13 @@ class RoleDNAService:
         expected_version: EntityVersion,
         revision: RoleDNARevision,
     ) -> dict:
-        changes = self.repo.serialize_revision(revision)
-        if not changes:
+        serialized = self.repo.serialize_revision(revision)
+        business_changes = {
+            key: value
+            for key, value in serialized.items()
+            if key not in {"version_provenance", "version_provenance_ref"}
+        }
+        if not business_changes:
             raise ValueError("Role DNA revision must contain at least one business change")
 
         client = get_client()
@@ -58,7 +63,9 @@ class RoleDNAService:
                         )
                     next_version = int(expected_version) + 1
                     new_doc = dict(current)
-                    new_doc.update(changes)
+                    new_doc.update(business_changes)
+                    new_doc["version_provenance"] = serialized["version_provenance"]
+                    new_doc["version_provenance_ref"] = serialized.get("version_provenance_ref")
                     new_doc["_id"] = f"{role_dna_id}:v{next_version}"
                     new_doc["version"] = next_version
                     new_doc["updated_at"] = now
