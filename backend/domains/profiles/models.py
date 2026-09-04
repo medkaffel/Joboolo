@@ -3,7 +3,7 @@
 Professional facts live here. Preferences, Discovery, Intent, Permission and CV
 access deliberately do not: those belong to separate bounded contexts.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Tuple
@@ -13,10 +13,11 @@ from domains.shared.versioning import EntityVersion
 
 
 class FactSource(str, Enum):
+    """Origin of a professional fact, not a normalization/transformation state."""
+
     CANDIDATE_DECLARED = "candidate_declared"
     LEGACY_USER = "legacy_user"
     IMPORTED = "imported"
-    NORMALIZED = "normalized"
 
 
 @dataclass(frozen=True)
@@ -24,11 +25,14 @@ class SkillFact:
     name: str
     source: FactSource
     normalized_name: Optional[str] = None
+    normalization_ref: Optional[str] = None
     evidence_refs: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("skill name cannot be empty")
+        if (self.normalized_name is None) != (self.normalization_ref is None):
+            raise ValueError("normalized skill requires both normalized_name and normalization_ref")
 
 
 @dataclass(frozen=True)
@@ -36,10 +40,15 @@ class OccupationFact:
     title: str
     source: FactSource
     normalized_occupation: Optional[str] = None
+    normalization_ref: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("occupation title cannot be empty")
+        if (self.normalized_occupation is None) != (self.normalization_ref is None):
+            raise ValueError(
+                "normalized occupation requires both normalized_occupation and normalization_ref"
+            )
 
 
 @dataclass(frozen=True)

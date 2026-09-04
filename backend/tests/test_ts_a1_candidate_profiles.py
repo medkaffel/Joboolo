@@ -47,6 +47,23 @@ def test_profile_patch_rejects_negative_experience():
         CandidateProfilePatch(experience_years=-1)
 
 
+def test_normalization_cannot_erase_fact_origin_or_lose_provenance():
+    with pytest.raises(ValueError):
+        SkillFact(
+            name="Py",
+            source=FactSource.CANDIDATE_DECLARED,
+            normalized_name="Python",
+        )
+    fact = SkillFact(
+        name="Py",
+        source=FactSource.CANDIDATE_DECLARED,
+        normalized_name="Python",
+        normalization_ref="taxonomy:v1:python",
+    )
+    assert fact.source == FactSource.CANDIDATE_DECLARED
+    assert fact.normalization_ref == "taxonomy:v1:python"
+
+
 def test_patch_serialization_keeps_declared_source_and_no_hidden_fields():
     patch = CandidateProfilePatch(
         summary="Senior backend engineer",
@@ -58,6 +75,7 @@ def test_patch_serialization_keeps_declared_source_and_no_hidden_fields():
         "name": "Python",
         "source": "candidate_declared",
         "normalized_name": None,
+        "normalization_ref": None,
         "evidence_refs": (),
     }]
     assert "salary" not in mongo
