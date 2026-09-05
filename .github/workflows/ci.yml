@@ -34,7 +34,13 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install backend dependencies
-        run: python -m pip install -r requirements.txt
+        # `emergentintegrations` is an environment-provided package and is not
+        # published on public PyPI. None of the hermetic G0 suites imports it.
+        # Keep the application requirements file untouched and exclude only that
+        # unavailable package in this isolated public-runner gate.
+        run: |
+          grep -v '^emergentintegrations==' requirements.txt > /tmp/joboolo-ci-requirements.txt
+          python -m pip install -r /tmp/joboolo-ci-requirements.txt
 
       - name: Compile backend
         run: python -m compileall -q .
