@@ -14,14 +14,18 @@ if not BASE_URL:
                 BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN = {"email": "admin@joboolo.fr", "password": "AdminJoboolo2026!"}
-PARTNER = {"email": "partenaire@joboolo.fr", "password": "Partner2026!"}
-POST_PARTNER = {"email": "posting@joboolo.fr", "password": "Post2026!"}
+# E2E credentials must come from environment — no repository fallbacks
+ADMIN_EMAIL = os.environ.get("E2E_ADMIN_EMAIL", "admin@joboolo.fr")
+ADMIN_PASSWORD = os.environ.get("E2E_ADMIN_PASSWORD")
+PARTNER_EMAIL = os.environ.get("E2E_PARTNER_EMAIL", "partenaire@joboolo.fr")
+PARTNER_PASSWORD = os.environ.get("E2E_PARTNER_PASSWORD")
+POST_PARTNER_EMAIL = os.environ.get("E2E_POSTING_PARTNER_EMAIL", "posting@joboolo.fr")
+POST_PARTNER_PASSWORD = os.environ.get("E2E_POSTING_PARTNER_PASSWORD")
 
 
-def _login(creds):
-    r = requests.post(f"{API}/auth/login", json=creds)
-    assert r.status_code == 200, f"login failed for {creds['email']}: {r.status_code} {r.text}"
+def _login(email, password):
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200, f"login failed for {email}: {r.status_code} {r.text}"
     return r.json()["token"]["access_token"]
 
 
@@ -31,17 +35,23 @@ def _h(tok):
 
 @pytest.fixture(scope="module")
 def admin_token():
-    return _login(ADMIN)
+    if not ADMIN_PASSWORD:
+        pytest.skip("E2E_ADMIN_PASSWORD not set")
+    return _login(ADMIN_EMAIL, ADMIN_PASSWORD)
 
 
 @pytest.fixture(scope="module")
 def partner_token():
-    return _login(PARTNER)
+    if not PARTNER_PASSWORD:
+        pytest.skip("E2E_PARTNER_PASSWORD not set")
+    return _login(PARTNER_EMAIL, PARTNER_PASSWORD)
 
 
 @pytest.fixture(scope="module")
 def posting_partner_token():
-    return _login(POST_PARTNER)
+    if not POST_PARTNER_PASSWORD:
+        pytest.skip("E2E_POSTING_PARTNER_PASSWORD not set")
+    return _login(POST_PARTNER_EMAIL, POST_PARTNER_PASSWORD)
 
 
 # ---------- Admin general settings ----------
@@ -141,7 +151,11 @@ class TestAdminAlerts:
     @pytest.fixture(scope="class", autouse=True)
     def _seed_alert(self, request):
         # Seed one alert via a candidate account so admin has something to toggle/delete
-        rc = requests.post(f"{API}/auth/login", json={"email": "candidate@joboolo.fr", "password": "Test1234"})
+        cand_email = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@joboolo.fr")
+        cand_pwd = os.environ.get("E2E_CANDIDATE_PASSWORD")
+        if not cand_pwd:
+            pytest.skip("E2E_CANDIDATE_PASSWORD not set")
+        rc = requests.post(f"{API}/auth/login", json={"email": cand_email, "password": cand_pwd})
         assert rc.status_code == 200
         tok = rc.json()["token"]["access_token"]
         r = requests.post(f"{API}/alerts", headers=_h(tok),

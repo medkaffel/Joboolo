@@ -19,14 +19,17 @@ if not BASE_URL:
 
 API = f"{BASE_URL}/api"
 
-CANDIDATE_EMAIL = "candidate@joboolo.fr"
-CANDIDATE_PWD = "Test1234"
-EMPLOYER_EMAIL = "employer@joboolo.fr"
-EMPLOYER_PWD = "Test1234"
+# E2E credentials must come from environment — no repository fallbacks
+CANDIDATE_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@joboolo.fr")
+CANDIDATE_PWD = os.environ.get("E2E_CANDIDATE_PASSWORD")
+EMPLOYER_EMAIL = os.environ.get("E2E_EMPLOYER_EMAIL", "employer@joboolo.fr")
+EMPLOYER_PWD = os.environ.get("E2E_EMPLOYER_PASSWORD")
 
 
 @pytest.fixture(scope="session")
 def candidate_token():
+    if not CANDIDATE_PWD:
+        pytest.skip("E2E_CANDIDATE_PASSWORD not set")
     r = requests.post(f"{API}/auth/login", json={"email": CANDIDATE_EMAIL, "password": CANDIDATE_PWD})
     if r.status_code != 200:
         # try register
@@ -40,6 +43,8 @@ def candidate_token():
 
 @pytest.fixture(scope="session")
 def employer_token():
+    if not EMPLOYER_PWD:
+        pytest.skip("E2E_EMPLOYER_PASSWORD not set")
     r = requests.post(f"{API}/auth/login", json={"email": EMPLOYER_EMAIL, "password": EMPLOYER_PWD})
     if r.status_code != 200:
         r = requests.post(f"{API}/auth/register", json={

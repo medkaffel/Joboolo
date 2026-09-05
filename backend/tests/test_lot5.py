@@ -12,10 +12,11 @@ if not BASE_URL:
                 BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
 API = f"{BASE_URL}/api"
 
-EMP_EMAIL = "recruteur@techcorp.fr"
-EMP_PWD = "password123"
-CAND_EMAIL = "candidate@test.fr"
-CAND_PWD = "password123"
+# E2E credentials must come from environment — no repository fallbacks
+EMP_EMAIL = os.environ.get("E2E_EMPLOYER_EMAIL", "recruteur@techcorp.fr")
+EMP_PWD = os.environ.get("E2E_EMPLOYER_PASSWORD")
+CAND_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@test.fr")
+CAND_PWD = os.environ.get("E2E_CANDIDATE_PASSWORD")
 
 
 def _h(t): return {"Authorization": f"Bearer {t}"}
@@ -23,6 +24,8 @@ def _h(t): return {"Authorization": f"Bearer {t}"}
 
 @pytest.fixture(scope="session")
 def emp_token():
+    if not EMP_PWD:
+        pytest.skip("E2E_EMPLOYER_PASSWORD not set")
     r = requests.post(f"{API}/auth/login", json={"email": EMP_EMAIL, "password": EMP_PWD})
     assert r.status_code == 200, r.text
     return r.json()["token"]["access_token"]

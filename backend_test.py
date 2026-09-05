@@ -14,6 +14,12 @@ import time
 BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://job-platform-next.preview.emergentagent.com')
 API_BASE_URL = f"{BACKEND_URL}/api"
 
+# E2E credentials - must come from environment, no repository fallbacks
+CANDIDATE_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@test.fr")
+CANDIDATE_PASSWORD = os.environ.get("E2E_CANDIDATE_PASSWORD")
+EMPLOYER_EMAIL = os.environ.get("E2E_EMPLOYER_EMAIL", "recruteur@techcorp.fr")
+EMPLOYER_PASSWORD = os.environ.get("E2E_EMPLOYER_PASSWORD")
+
 class IndeedCloneAPITester:
     def __init__(self):
         self.session = requests.Session()
@@ -59,9 +65,10 @@ class IndeedCloneAPITester:
     def test_register_candidate(self):
         """Test candidate registration"""
         try:
+            import uuid
             candidate_data = {
-                "email": "testcandidate@example.com",
-                "password": "testpassword123",
+                "email": f"testcandidate_{uuid.uuid4().hex[:8]}@example.com",
+                "password": f"TestPwd_{uuid.uuid4().hex[:8]}",
                 "first_name": "Alice",
                 "last_name": "Candidate",
                 "user_type": "candidate",
@@ -90,9 +97,10 @@ class IndeedCloneAPITester:
     def test_register_employer(self):
         """Test employer registration"""
         try:
+            import uuid
             employer_data = {
-                "email": "testemployer@example.com",
-                "password": "testpassword123",
+                "email": f"testemployer_{uuid.uuid4().hex[:8]}@example.com",
+                "password": f"TestPwd_{uuid.uuid4().hex[:8]}",
                 "first_name": "Bob",
                 "last_name": "Employer",
                 "user_type": "employer",
@@ -117,10 +125,13 @@ class IndeedCloneAPITester:
 
     def test_login_candidate(self):
         """Test candidate login"""
+        if not CANDIDATE_PASSWORD:
+            self.log_test("Login Candidate", False, "E2E_CANDIDATE_PASSWORD not set")
+            return False
         try:
             login_data = {
-                "email": "candidate@test.fr",
-                "password": "password123"
+                "email": CANDIDATE_EMAIL,
+                "password": CANDIDATE_PASSWORD
             }
             
             response = self.session.post(f"{API_BASE_URL}/auth/login", json=login_data)
@@ -141,10 +152,13 @@ class IndeedCloneAPITester:
 
     def test_login_employer(self):
         """Test employer login"""
+        if not EMPLOYER_PASSWORD:
+            self.log_test("Login Employer", False, "E2E_EMPLOYER_PASSWORD not set")
+            return False
         try:
             login_data = {
-                "email": "recruteur@techcorp.fr",
-                "password": "password123"
+                "email": EMPLOYER_EMAIL,
+                "password": EMPLOYER_PASSWORD
             }
             
             response = self.session.post(f"{API_BASE_URL}/auth/login", json=login_data)

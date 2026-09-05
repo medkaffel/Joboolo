@@ -130,7 +130,7 @@ Build a responsive job board like indeed.fr, rebranded "Joboolo" (French UI). Fu
 - Header nav links updated to: Rechercher des emplois / Recruteur (/post-job) / Partenaire / Affiliation.
 
 ## Partner & Admin (2026 — Phase 1 done)
-- Roles: added `partner` and `admin` to UserType. require_admin dependency in auth.py. Default admin seeded at startup (admin@joboolo.fr / AdminJoboolo2026!).
+- Roles: added `partner` and `admin` to UserType. require_admin dependency in auth.py. Default admin seeded at startup (admin@joboolo.fr / password from ADMIN_INITIAL_PASSWORD env var).
 - Admin back-office at /adminos (AdminDashboard.jsx): stats, tabs Candidats/Employeurs/Partenaires/Offres. Manage users (toggle active / delete / edit), search jobs + stop/resume diffusion + delete. Create partners + configure billing.
 - Partner billing config (partner_profiles collection): billing_mode per_click|per_posting, default_cpc (€), posting_price (€/annonce), packs (add 5/10/20/50/100/200 → postings_remaining), balance (€ prepaid), xml_feed_url, total_clicks, total_spent.
 - Backend: routes/admin.py (require_admin). adminService.js frontend.

@@ -5,6 +5,19 @@ from config import ensure_seeding_allowed
 import asyncio
 from datetime import datetime, timedelta
 import uuid
+import os
+
+
+def _get_seed_demo_password() -> str:
+    """Get the seed demo password from environment. No fallback allowed."""
+    pwd = os.environ.get("SEED_DEMO_PASSWORD")
+    if not pwd:
+        raise RuntimeError(
+            "SEED_DEMO_PASSWORD environment variable is required for seeding. "
+            "No default password is provided."
+        )
+    return pwd
+
 
 async def seed_companies():
     """Seed companies data"""
@@ -116,6 +129,10 @@ async def seed_users():
     """Seed users data"""
     db = await get_database()
     
+    # Get seed password from environment (required, no fallback)
+    seed_password = _get_seed_demo_password()
+    password_hash = get_password_hash(seed_password)
+    
     users_data = [
         # Employers
         {
@@ -124,7 +141,7 @@ async def seed_users():
             "first_name": "Marie",
             "last_name": "Dubois",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Paris",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -136,7 +153,7 @@ async def seed_users():
             "first_name": "Pierre",
             "last_name": "Martin",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Lyon",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -148,7 +165,7 @@ async def seed_users():
             "first_name": "Sophie",
             "last_name": "Bernard",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Marseille",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -160,7 +177,7 @@ async def seed_users():
             "first_name": "Thomas",
             "last_name": "Leroy",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Toulouse",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -172,7 +189,7 @@ async def seed_users():
             "first_name": "Julie",
             "last_name": "Moreau",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Nantes",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -184,7 +201,7 @@ async def seed_users():
             "first_name": "Antoine",
             "last_name": "Petit",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Bordeaux",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -196,7 +213,7 @@ async def seed_users():
             "first_name": "Camille",
             "last_name": "Rousseau",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Paris",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -208,7 +225,7 @@ async def seed_users():
             "first_name": "Laurent",
             "last_name": "Garcia",
             "user_type": UserType.EMPLOYER,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Nice",
             "is_active": True,
             "created_at": datetime.utcnow(),
@@ -221,7 +238,7 @@ async def seed_users():
             "first_name": "Jean",
             "last_name": "Dupont",
             "user_type": UserType.CANDIDATE,
-            "hashed_password": get_password_hash("password123"),
+            "hashed_password": password_hash,
             "location": "Paris",
             "bio": "Développeur full stack passionné",
             "skills": ["JavaScript", "React", "Node.js", "Python"],

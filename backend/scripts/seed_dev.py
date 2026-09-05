@@ -7,9 +7,11 @@ en production : config.ensure_seeding_allowed() (source unique APP_ENV) refuse
 avant toute écriture DB.
 
 Usage (explicite par un développeur) :
-    APP_ENV=development python scripts/seed_dev.py
-    APP_ENV=test python scripts/seed_dev.py
+    APP_ENV=development SEED_DEMO_PASSWORD="your-password" python scripts/seed_dev.py
+    APP_ENV=test SEED_DEMO_PASSWORD="your-password" python scripts/seed_dev.py
 
+Le mot de passe de seed doit être fourni via la variable d'environnement
+SEED_DEMO_PASSWORD. Aucun mot de passe par défaut n'est fourni.
 Ne contient aucun secret et ne crée jamais d'administrateur.
 """
 
