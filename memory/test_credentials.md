@@ -1,46 +1,48 @@
-# Test Credentials — Joboolo
+# Test Accounts — Joboolo
 
-## Partner account (Stripe top-up test — /partenaire)
-- Email: partenaire@joboolo.fr
-- Password: Partner2026!
-- Company: Partenaire Demo (per_click, CPC 0.35 €). Balance credited via Stripe test payment.
+This file intentionally contains **no passwords, API keys, tokens, personal OAuth identities, or other secrets**.
 
-## Partner account per_posting (posting-pack Stripe test — /partenaire)
-- Email: posting@joboolo.fr
-- Password: Post2026!
-- Company: PostCorp (per_posting, 3.00 €/annonce). Buys posting packs via Stripe.
+The repository is public. Test credentials must be supplied outside Git (for example through local/CI environment variables or an approved secret store). Never commit real credentials here, even for test accounts.
 
-## Admin account (back-office at /adminos)
-- Email: admin@joboolo.fr
-- Password: AdminJoboolo2026!
+## Shared test-account roles
 
-## Partner self-registration (pending validation flow)
-- New partners register via header "Partenaire" -> AuthModal -> Inscription -> account type "Partenaire".
-- Backend POST /api/auth/register-partner creates user with is_active=False (pending). Login returns 403 until an admin activates the account (Admin > Partenaires > toggle active, or PUT /api/admin/partners/{id}/config is_active=true, or POST /api/admin/users/{id}/toggle).
-- Admin notification email sent to ADMIN_EMAIL (default admin@joboolo.fr) on signup (best-effort via Resend).
+The historical test suite uses the following account roles:
 
-## Candidate account
-- Email: candidate@joboolo.fr
-- Password: Test1234
+- candidate
+- employer / recruiter
+- per-click partner
+- per-posting partner
+- admin
+- optional seeded development users
 
-## Employer account (own seed companies? no — freshly registered, no companies yet)
-- Email: employer@joboolo.fr
-- Password: Test1234
+When an E2E environment requires fixed shared accounts, provide both the account identifier and password explicitly through the environment used by that isolated environment. Test code must not fall back to a repository-known password.
 
-## Seed candidate (persistent, pre-populated profile)
-- Email: candidate@test.fr
-- Password: password123
+Recommended variable families:
 
-## Seed employers (persistent, each OWNS a seed company with jobs — good for testing "Mes offres")
-- Email: recruteur@techcorp.fr  (owns TechCorp France, has seed jobs)
-- Password: password123
-- Other seed employers (all password123): hr@digitalboost.fr, rh@hopital-antoine.fr, recrutement@softsales.fr, contact@expertise-plus.fr, rh@mediacom.fr, jobs@datainsights.fr, recrutement@education.gouv.fr
+- `E2E_CANDIDATE_EMAIL` / `E2E_CANDIDATE_PASSWORD`
+- `E2E_EMPLOYER_EMAIL` / `E2E_EMPLOYER_PASSWORD`
+- `E2E_ADMIN_EMAIL` / `E2E_ADMIN_PASSWORD`
+- `E2E_PARTNER_EMAIL` / `E2E_PARTNER_PASSWORD`
+- `E2E_POSTING_PARTNER_EMAIL` / `E2E_POSTING_PARTNER_PASSWORD`
 
-Notes:
-- Auth is JWT-based (email + password). Register: POST /api/auth/register, login: POST /api/auth/login.
-- Google login is REAL via Emergent-managed Google Auth (button "Continuer avec Google"). Flow: redirect to auth.emergentagent.com, returns with #session_id, backend exchanges it at POST /api/auth/google/session and issues app JWT. Google-created users default to candidate type.
-- Facebook/X/LinkedIn OAuth were removed per user request.
-- Seeding is now IDEMPOTENT (upsert) — registered users, posted jobs and companies persist across backend restarts.
-- Email alerts (Resend) are LIVE and unrestricted: RESEND_API_KEY set in /app/backend/.env, SENDER_EMAIL=noreply@joboolo.fr (domain joboolo.fr verified on Resend). Delivery works to any recipient.
-- Daily scheduler runs at 08:00 UTC (APScheduler) for active alerts; on-demand send via POST /api/alerts/{id}/send-now.
-- Google OAuth user example (no password): medkaffel@gmail.com (oauth_provider=google). Password login for OAuth-only accounts correctly returns 401 (not 500).
+## Partner self-registration flow
+
+New partners register through the Partner signup flow. The backend creates a pending partner account that must be activated by an authorized admin before normal login is allowed. Admin notification email is best-effort and depends on the environment's mail configuration.
+
+## OAuth
+
+Google OAuth may be enabled in configured environments. OAuth-only test identities must be environment-owned fixtures; do not document a real person's account in the repository. Password login for an OAuth-only account should remain rejected.
+
+## Seed / development data
+
+Development seeds are explicit operations, not startup behavior. If an isolated development or E2E environment needs seeded users, their credentials must be supplied/configured for that environment and must not be reused for production or public services.
+
+## External services
+
+Email, Stripe, OAuth and object-storage integration tests must use dedicated test/sandbox configuration. Do not place service credentials or statements about live unrestricted credentials in repository documentation.
+
+## Rotation requirement after an exposure
+
+If a credential has ever been committed to Git, treat it as exposed. Repository sanitation does **not** invalidate an already exposed credential. Rotate or disable reachable accounts/secrets in the owning environment first, then update isolated test fixtures as needed.
+
+Git history rewriting is a separate operational decision and is not required merely to remove a credential from the current branch once the exposed credential has been invalidated.
