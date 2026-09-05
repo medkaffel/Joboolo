@@ -41,33 +41,47 @@ jobs:
         run: |
           grep -v '^emergentintegrations==' requirements.txt > /tmp/joboolo-ci-requirements.txt
           python -m pip install -r /tmp/joboolo-ci-requirements.txt
+          # The repository's async tests use @pytest.mark.asyncio but the plugin
+          # is not declared in the application requirements. Pin it in G0 only;
+          # pytest-asyncio 1.4.0 supports pytest 9 and Python 3.11.
+          python -m pip install pytest-asyncio==1.4.0
 
       - name: Compile backend
         run: python -m compileall -q .
 
       - name: Run hermetic regression suites
-        run: >-
-          pytest
-          tests/test_config.py
-          tests/test_cpc_concurrency.py
-          tests/test_cpc_stress.py
-          tests/test_file_acl.py
-          tests/test_p0_008_safe_redirect.py
-          tests/test_p0_010_manual_job_geocoding.py
-          tests/test_p0_013_partner_credit.py
-          tests/test_p0_014_applications_atomic.py
-          tests/test_seeding_production.py
-          tests/test_ts_a0_contracts.py
-          tests/test_ts_a1_candidate_profiles.py
-          tests/test_ts_a2_candidate_preferences.py
-          tests/test_ts_a3_role_dna.py
-          tests/test_ts_a4_opportunity_specs.py
-          tests/test_ts_a5_professional_match.py
-          tests/test_ts_a6_opportunity_fit.py
-          tests/test_ts_a7_organization_verification.py
-          tests/test_ts_a8_recruiting_trust.py
-          tests/test_ts_a9_authorization_grants.py
-          tests/test_ts_a10_privacy_lifecycle.py
+        # Several legacy tests deliberately install import stubs in sys.modules.
+        # Running every file in one pytest collection lets those stubs leak into
+        # unrelated suites. Execute each bounded suite in a fresh pytest process
+        # while preserving pytest.ini (including xdist) for every invocation.
+        run: |
+          suites=(
+            tests/test_config.py
+            tests/test_cpc_concurrency.py
+            tests/test_cpc_stress.py
+            tests/test_file_acl.py
+            tests/test_p0_008_safe_redirect.py
+            tests/test_p0_010_manual_job_geocoding.py
+            tests/test_p0_013_partner_credit.py
+            tests/test_p0_014_applications_atomic.py
+            tests/test_seeding_production.py
+            tests/test_ts_a0_contracts.py
+            tests/test_ts_a1_candidate_profiles.py
+            tests/test_ts_a2_candidate_preferences.py
+            tests/test_ts_a3_role_dna.py
+            tests/test_ts_a4_opportunity_specs.py
+            tests/test_ts_a5_professional_match.py
+            tests/test_ts_a6_opportunity_fit.py
+            tests/test_ts_a7_organization_verification.py
+            tests/test_ts_a8_recruiting_trust.py
+            tests/test_ts_a9_authorization_grants.py
+            tests/test_ts_a10_privacy_lifecycle.py
+          )
+          for suite in "${suites[@]}"; do
+            echo "::group::${suite}"
+            python -m pytest "${suite}"
+            echo "::endgroup::"
+          done
 
   frontend-build:
     name: Frontend build
