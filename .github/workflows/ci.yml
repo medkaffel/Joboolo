@@ -83,6 +83,127 @@ jobs:
             echo "::endgroup::"
           done
 
+  backend-mongo:
+    name: Backend Mongo integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        # Match G0 without changing application requirements on the public runner.
+        run: |
+          grep -v '^emergentintegrations==' requirements.txt > /tmp/joboolo-ci-requirements.txt
+          python -m pip install -r /tmp/joboolo-ci-requirements.txt
+          python -m pip install pytest-asyncio==1.4.0
+
+      - name: Start disposable MongoDB instances
+        run: |
+          docker run -d --name joboolo-mongo-rs \
+            -p 127.0.0.1:27017:27017 \
+            mongo:7.0.14 --replSet rs0 --bind_ip_all
+          docker run -d --name joboolo-mongo-standalone \
+            -p 127.0.0.1:27018:27017 \
+            mongo:7.0.14 --bind_ip_all
+
+      - name: Initialize replica set and prove readiness
+        run: |
+          ready=0
+          for _ in {1..60}; do
+            if docker exec joboolo-mongo-rs mongosh --quiet \
+              --eval 'db.adminCommand({ping: 1}).ok' 2>/dev/null | grep -qx '1'; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "Replica-set mongod never became reachable" >&2
+            exit 1
+          fi
+
+          docker exec joboolo-mongo-rs mongosh --quiet --eval \
+            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+
+          primary=0
+          for _ in {1..60}; do
+            if docker exec joboolo-mongo-rs mongosh --quiet \
+              --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -qx 'true'; then
+              primary=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$primary" -ne 1 ]; then
+            echo "Replica set never reached PRIMARY" >&2
+            docker logs joboolo-mongo-rs >&2 || true
+            exit 1
+          fi
+
+      - name: Prove standalone readiness
+        run: |
+          ready=0
+          for _ in {1..60}; do
+            if docker exec joboolo-mongo-standalone mongosh --quiet \
+              --eval 'db.adminCommand({ping: 1}).ok' 2>/dev/null | grep -qx '1'; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "Standalone MongoDB never became reachable" >&2
+            docker logs joboolo-mongo-standalone >&2 || true
+            exit 1
+          fi
+
+      - name: Compile backend
+        run: python -m compileall -q .
+
+      - name: Run disposable Mongo regression suites
+        env:
+          P005_REPLICA_SET_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0
+          P005_STANDALONE_URL: mongodb://127.0.0.1:27018/
+        run: |
+          suites=(
+            tests/test_cpc_mongo_integration.py
+            tests/test_p0_005_mongo_integration.py
+            tests/test_p0_006_mongo_integration.py
+          )
+          index=0
+          for suite in "${suites[@]}"; do
+            index=$((index + 1))
+            report="/tmp/joboolo-g1-${index}.xml"
+            echo "::group::${suite}"
+            python -m pytest "${suite}" --junitxml="${report}"
+            python - "${report}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          skipped = sum(int(s.attrib.get("skipped", "0")) for s in suites)
+          if skipped:
+              raise SystemExit(f"G1 requires zero skipped tests; observed {skipped}")
+          PY
+            echo "::endgroup::"
+          done
+
+      - name: Cleanup MongoDB containers
+        if: always()
+        run: docker rm -f joboolo-mongo-rs joboolo-mongo-standalone || true
+
   frontend-build:
     name: Frontend build
     runs-on: ubuntu-latest
