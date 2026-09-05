@@ -1,0 +1,91 @@
+name: ci-core
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-hermetic:
+    name: Backend hermetic
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile backend
+        run: python -m compileall -q .
+
+      - name: Run hermetic regression suites
+        run: >-
+          pytest
+          tests/test_config.py
+          tests/test_cpc_concurrency.py
+          tests/test_cpc_stress.py
+          tests/test_file_acl.py
+          tests/test_p0_008_safe_redirect.py
+          tests/test_p0_010_manual_job_geocoding.py
+          tests/test_p0_013_partner_credit.py
+          tests/test_p0_014_applications_atomic.py
+          tests/test_seeding_production.py
+          tests/test_ts_a0_contracts.py
+          tests/test_ts_a1_candidate_profiles.py
+          tests/test_ts_a2_candidate_preferences.py
+          tests/test_ts_a3_role_dna.py
+          tests/test_ts_a4_opportunity_specs.py
+          tests/test_ts_a5_professional_match.py
+          tests/test_ts_a6_opportunity_fit.py
+          tests/test_ts_a7_organization_verification.py
+          tests/test_ts_a8_recruiting_trust.py
+          tests/test_ts_a9_authorization_grants.py
+          tests/test_ts_a10_privacy_lifecycle.py
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Install Yarn 1
+        run: npm install --global yarn@1.22.22
+
+      - name: Install frontend dependencies
+        run: yarn install --non-interactive
+
+      - name: Build frontend
+        env:
+          CI: "true"
+        run: yarn build
