@@ -6,11 +6,11 @@ import time
 import uuid
 import pytest
 import requests
-from dotenv import dotenv_values
 
-fe = dotenv_values("/app/frontend/.env")
-BASE = (os.environ.get("REACT_APP_BACKEND_URL") or fe.get("REACT_APP_BACKEND_URL", "")).rstrip("/")
-API = f"{BASE}/api"
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
+API = f"{BASE_URL}/api"
 
 # E2E credentials must come from environment — no repository fallbacks
 ADMIN_EMAIL = os.environ.get("E2E_ADMIN_EMAIL", "admin@joboolo.fr")

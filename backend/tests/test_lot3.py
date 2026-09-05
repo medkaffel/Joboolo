@@ -2,16 +2,12 @@
 Covers: admin general settings, xml-feeds CRUD, admin alerts,
 partner campaigns CRUD (per_click + per_posting)."""
 import os
-import time
 import pytest
 import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
-    with open("/app/frontend/.env") as f:
-        for line in f:
-            if line.startswith("REACT_APP_BACKEND_URL="):
-                BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
 API = f"{BASE_URL}/api"
 
 # E2E credentials must come from environment — no repository fallbacks

@@ -456,6 +456,8 @@ async def seed_jobs():
 async def seed_database():
     """Seed all data (explicit dev/test only; refused in production)."""
     ensure_seeding_allowed()
+    # Validate SEED_DEMO_PASSWORD before ANY database write
+    _get_seed_demo_password()
     print("Starting database seeding...")
     await seed_companies()
     await seed_users()

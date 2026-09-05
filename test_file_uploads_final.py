@@ -7,9 +7,14 @@ Tests all scenarios from the review request
 import requests
 import io
 import os
+import sys
 from datetime import datetime
 
-BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://job-platform-next.preview.emergentagent.com')
+BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+if not BACKEND_URL:
+    print("ERROR: REACT_APP_BACKEND_URL environment variable is required but not set.", file=sys.stderr)
+    print("Set REACT_APP_BACKEND_URL to your backend API base URL (e.g., https://api.example.com)", file=sys.stderr)
+    sys.exit(1)
 API_BASE_URL = f"{BACKEND_URL}/api"
 
 # Test credentials - must come from environment, no repository fallbacks

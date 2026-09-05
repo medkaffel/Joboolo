@@ -5,13 +5,10 @@ import uuid
 
 import pytest
 import requests
-from dotenv import dotenv_values
 
-frontend_env = dotenv_values("/app/frontend/.env")
-base_url = os.environ.get("REACT_APP_BACKEND_URL") or frontend_env.get("REACT_APP_BACKEND_URL")
-if not base_url:
-    raise RuntimeError("REACT_APP_BACKEND_URL missing")
-BASE_URL = base_url.rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
 
 # E2E credentials must come from environment — no repository fallbacks
 CAND_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@test.fr")

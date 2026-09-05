@@ -2,21 +2,12 @@
 Covers: auth register/login/PUT me, alerts CRUD + send-now, google/session 401,
 employer flow (company + job create/list/delete)."""
 import os
-import time
 import pytest
 import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
-    # fallback: read from frontend .env
-    try:
-        with open("/app/frontend/.env") as f:
-            for line in f:
-                if line.startswith("REACT_APP_BACKEND_URL="):
-                    BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
-    except FileNotFoundError:
-        pass
-
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
 API = f"{BASE_URL}/api"
 
 # E2E credentials must come from environment — no repository fallbacks

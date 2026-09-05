@@ -7,11 +7,16 @@ Tests all authentication, jobs, applications, companies, and saved jobs endpoint
 import requests
 import json
 import os
+import sys
 from datetime import datetime
 import time
 
-# Get backend URL from environment
-BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://job-platform-next.preview.emergentagent.com')
+# Get backend URL from environment - MUST be explicitly set, no fallbacks
+BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+if not BACKEND_URL:
+    print("ERROR: REACT_APP_BACKEND_URL environment variable is required but not set.", file=sys.stderr)
+    print("Set REACT_APP_BACKEND_URL to your backend API base URL (e.g., https://api.example.com)", file=sys.stderr)
+    sys.exit(1)
 API_BASE_URL = f"{BACKEND_URL}/api"
 
 # E2E credentials - must come from environment, no repository fallbacks

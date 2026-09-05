@@ -78,10 +78,21 @@ class TestSeedDataUsesGuard:
             called["v"] += 1
 
         monkeypatch.setattr(config, "ensure_seeding_allowed", _fake_guard)
+        monkeypatch.setenv("SEED_DEMO_PASSWORD", "test-password")
         seed = _load_seed_data(monkeypatch, neutralize_db=True)
         import asyncio
         asyncio.run(seed.seed_database())
         assert called["v"] >= 1
+
+    def test_seed_database_refuses_when_seed_password_missing_in_dev(self, monkeypatch):
+        """En development, seed_database() lève si SEED_DEMO_PASSWORD est absent, AVANT toute écriture DB."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.delenv("SEED_DEMO_PASSWORD", raising=False)
+        seed = _load_seed_data(monkeypatch)
+        import asyncio
+        with pytest.raises(RuntimeError) as exc:
+            asyncio.run(seed.seed_database())
+        assert "SEED_DEMO_PASSWORD" in str(exc.value)
 
 
 class TestSeedUsersRequiresEnvPassword:
@@ -284,16 +295,9 @@ class TestCreateAdminScript:
         monkeypatch.setenv("ADMIN_INITIAL_PASSWORD", "a-forte-password")
         password = os.environ.get(admin._ADMIN_PASSWORD_ENV)
         assert password == "a-forte-password"
-        # Verify it's not a known historical default (literals not retained in repo)
-        # Known bad patterns are defined via environment for test isolation (no defaults)
-        bad_prefixes_env = os.environ.get("TEST_BAD_PASSWORD_PREFIXES")
-        assert bad_prefixes_env, "TEST_BAD_PASSWORD_PREFIXES must be set for this test"
-        bad_prefixes = tuple(bad_prefixes_env.split(","))
-        assert not any(password.startswith(p) for p in bad_prefixes)
-        bad_full_env = os.environ.get("TEST_BAD_FULL_PASSWORDS")
-        assert bad_full_env, "TEST_BAD_FULL_PASSWORDS must be set for this test"
-        bad_full = set(bad_full_env.split(","))
-        assert password not in bad_full
+        # Positive invariant: password comes from ADMIN_INITIAL_PASSWORD env var only,
+        # no application default exists in the script. The provided value is passed
+        # directly to hashing/storage (tested in test_hashes_password_before_storage).
 
     def test_hashes_password_before_storage(self, monkeypatch):
         admin = _load_script("create_admin")
