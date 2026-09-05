@@ -10,7 +10,7 @@ sur `account_claim_tokens.expires_at` avec `expireAfterSeconds=0`.
 
 Usage :
   python scripts/migrate_stab004_account_claim_tokens.py [--dry-run]
-      [--mongo-url mongodb://127.0.0.1:27017] [--db-name indeed_clone]
+      [--mongo-url $MONGO_URL] [--db-name indeed_clone]
 """
 import argparse
 import asyncio
@@ -83,7 +83,7 @@ def _build_parser():
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="Rapport uniquement, AUCUNE écriture (ni index)")
-    parser.add_argument("--mongo-url", default=os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017"))
+    parser.add_argument("--mongo-url", default=os.environ.get("MONGO_URL"))
     parser.add_argument("--db-name", default=os.environ.get("DB_NAME", "indeed_clone"))
     return parser
 
@@ -94,6 +94,8 @@ def _parse_args(args=None):
 
 async def _main():
     args = _parse_args()
+    if not args.mongo_url:
+        raise SystemExit("MONGO_URL is required")
     from motor.motor_asyncio import AsyncIOMotorClient
     client = AsyncIOMotorClient(args.mongo_url, serverSelectionTimeoutMS=5000)
     try:
