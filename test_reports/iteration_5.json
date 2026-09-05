@@ -21,6 +21,6 @@
   "should_call_test_agent_after_fix": false,
   "should_main_agent_self_test": false,
   "context_for_next_testing_agent": "Lot 4 partial is fully green. Radius uses /api/jobs?location=<city>&radius=<km> with geocoded loc + 2dsphere; the Lyon 5km/100km ratio (19 vs 204) confirms the geo filter works. Impressions dedup key is sessionStorage 'joboolo_impr'; call is fire-and-forget (JobList useEffect). Provenance uses localStorage 'joboolo_attribution' (first-touch), merged into POST /auth/register and /auth/register-partner in services/authService.js. Admin candidate row exposes 'Provenance' column with data-testid admin-candidates-source-<id>.",
-  "test_credentials": "admin@joboolo.fr / AdminJoboolo2026! ; partenaire@joboolo.fr / Partner2026!",
+  "test_credentials": "admin@joboolo.fr / [E2E_ADMIN_PASSWORD] ; partenaire@joboolo.fr / [E2E_PARTNER_PASSWORD]",
   "rca_of_the_issue": "None — no defects observed for this iteration's scope."
 }

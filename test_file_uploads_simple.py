@@ -6,12 +6,18 @@ Simple test to check current state and verify the max-3 logic
 import requests
 import io
 import os
+import sys
 
-BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://job-platform-next.preview.emergentagent.com')
+BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+if not BACKEND_URL:
+    print("ERROR: REACT_APP_BACKEND_URL environment variable is required but not set.", file=sys.stderr)
+    print("Set REACT_APP_BACKEND_URL to your backend API base URL (e.g., https://api.example.com)", file=sys.stderr)
+    sys.exit(1)
 API_BASE_URL = f"{BACKEND_URL}/api"
 
-CANDIDATE_EMAIL = "candidate@test.fr"
-CANDIDATE_PASSWORD = "password123"
+# Test credentials - must come from environment, no repository fallbacks
+CANDIDATE_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@test.fr")
+CANDIDATE_PASSWORD = os.environ.get("E2E_CANDIDATE_PASSWORD")
 
 def create_test_pdf():
     """Create a minimal valid PDF file"""
@@ -54,6 +60,10 @@ startxref
     return pdf_content
 
 # Login
+if not CANDIDATE_PASSWORD:
+    print("E2E_CANDIDATE_PASSWORD not set, skipping test")
+    exit(0)
+    
 login_data = {"email": CANDIDATE_EMAIL, "password": CANDIDATE_PASSWORD}
 response = requests.post(f"{API_BASE_URL}/auth/login", json=login_data)
 token = response.json()["token"]["access_token"]

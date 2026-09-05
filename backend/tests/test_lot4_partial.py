@@ -6,14 +6,17 @@ import time
 import uuid
 import pytest
 import requests
-from dotenv import dotenv_values
 
-fe = dotenv_values("/app/frontend/.env")
-BASE = (os.environ.get("REACT_APP_BACKEND_URL") or fe.get("REACT_APP_BACKEND_URL", "")).rstrip("/")
-API = f"{BASE}/api"
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
+API = f"{BASE_URL}/api"
 
-ADMIN = ("admin@joboolo.fr", "AdminJoboolo2026!")
-PARTNER = ("partenaire@joboolo.fr", "Partner2026!")
+# E2E credentials must come from environment — no repository fallbacks
+ADMIN_EMAIL = os.environ.get("E2E_ADMIN_EMAIL", "admin@joboolo.fr")
+ADMIN_PASSWORD = os.environ.get("E2E_ADMIN_PASSWORD")
+PARTNER_EMAIL = os.environ.get("E2E_PARTNER_EMAIL", "partenaire@joboolo.fr")
+PARTNER_PASSWORD = os.environ.get("E2E_PARTNER_PASSWORD")
 
 
 def login(email, pwd):
@@ -24,6 +27,20 @@ def login(email, pwd):
 
 def H(tok):
     return {"Authorization": f"Bearer {tok}"}
+
+
+@pytest.fixture(scope="module")
+def admin_token():
+    if not ADMIN_PASSWORD:
+        pytest.skip("E2E_ADMIN_PASSWORD not set")
+    return login(ADMIN_EMAIL, ADMIN_PASSWORD)
+
+
+@pytest.fixture(scope="module")
+def partner_token():
+    if not PARTNER_PASSWORD:
+        pytest.skip("E2E_PARTNER_PASSWORD not set")
+    return login(PARTNER_EMAIL, PARTNER_PASSWORD)
 
 
 # -------- IP geo detect --------
@@ -80,9 +97,8 @@ class TestImpressions:
         assert r.status_code == 200
         assert r.json()["recorded"] == 0
 
-    def test_partner_performance_has_impressions(self):
-        tok = login(*PARTNER)
-        r = requests.get(f"{API}/partner/performance", headers=H(tok))
+    def test_partner_performance_has_impressions(self, partner_token):
+        r = requests.get(f"{API}/partner/performance", headers=H(partner_token))
         assert r.status_code == 200, r.text
         data = r.json()
         assert "totals" in data
@@ -113,9 +129,8 @@ class TestProvenance:
         r = requests.post(f"{API}/auth/register", json=payload)
         assert r.status_code == 200, f"register: {r.status_code} {r.text[:300]}"
 
-    def test_admin_sees_provenance(self):
-        tok = login(*ADMIN)
-        r = requests.get(f"{API}/admin/users", headers=H(tok), params={"user_type": "candidate"})
+    def test_admin_sees_provenance(self, admin_token):
+        r = requests.get(f"{API}/admin/users", headers=H(admin_token), params={"user_type": "candidate"})
         assert r.status_code == 200
         users = r.json()
         me = next((u for u in users if u.get("email") == self.email), None)
@@ -125,9 +140,8 @@ class TestProvenance:
         has_source = me.get("signup_source") or me.get("source") or (me.get("provenance") or {}).get("source")
         assert has_source, f"provenance/signup_source missing on admin user record: {list(me.keys())}"
 
-    def test_cleanup(self):
+    def test_cleanup(self, admin_token):
         if not TestProvenance.user_id:
             return
-        tok = login(*ADMIN)
-        r = requests.delete(f"{API}/admin/users/{TestProvenance.user_id}", headers=H(tok))
+        r = requests.delete(f"{API}/admin/users/{TestProvenance.user_id}", headers=H(admin_token))
         assert r.status_code in (200, 204, 404)

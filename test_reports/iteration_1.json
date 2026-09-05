@@ -43,7 +43,7 @@
     "/app/backend/tests/backend_test.py"
   ],
   "success_rate": {"backend": "100%", "frontend": "85%"},
-  "test_credentials": "Used candidate@joboolo.fr / Test1234 and employer@joboolo.fr / Test1234 as listed in /app/memory/test_credentials.md",
+  "test_credentials": "Used candidate@joboolo.fr / [E2E_CANDIDATE_PASSWORD] and employer@joboolo.fr / [E2E_EMPLOYER_PASSWORD] as listed in /app/memory/test_credentials.md",
   "seed_data_creation": "Test created transient TEST_Co_<ts> company and TEST job, both deleted via API in teardown.",
   "retest_needed": true,
   "main_agent_can_self_test": true,

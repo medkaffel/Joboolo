@@ -6,10 +6,16 @@ les comptes/offres/entreprises de démonstration. Il ne doit JAMAIS être exécu
 en production : config.ensure_seeding_allowed() (source unique APP_ENV) refuse
 avant toute écriture DB.
 
-Usage (explicite par un développeur) :
+Usage (explicite par un développeur, sans mettre le mot de passe dans la ligne
+de commande ni dans l'historique shell) :
+    read -rsp "Seed demo password: " SEED_DEMO_PASSWORD && echo
+    export SEED_DEMO_PASSWORD
     APP_ENV=development python scripts/seed_dev.py
-    APP_ENV=test python scripts/seed_dev.py
+    # ou : APP_ENV=test python scripts/seed_dev.py
+    unset SEED_DEMO_PASSWORD
 
+Le mot de passe de seed doit être fourni via la variable d'environnement
+SEED_DEMO_PASSWORD. Aucun mot de passe par défaut n'est fourni.
 Ne contient aucun secret et ne crée jamais d'administrateur.
 """
 

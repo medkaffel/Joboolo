@@ -5,16 +5,19 @@ import uuid
 
 import pytest
 import requests
-from dotenv import dotenv_values
 
-frontend_env = dotenv_values("/app/frontend/.env")
-base_url = os.environ.get("REACT_APP_BACKEND_URL") or frontend_env.get("REACT_APP_BACKEND_URL")
-if not base_url:
-    raise RuntimeError("REACT_APP_BACKEND_URL missing")
-BASE_URL = base_url.rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
 
-CAND = {"email": "candidate@test.fr", "password": "password123"}
-EMP = {"email": "recruteur@techcorp.fr", "password": "password123"}
+# E2E credentials must come from environment — no repository fallbacks
+CAND_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@test.fr")
+CAND_PWD = os.environ.get("E2E_CANDIDATE_PASSWORD")
+EMP_EMAIL = os.environ.get("E2E_EMPLOYER_EMAIL", "recruteur@techcorp.fr")
+EMP_PWD = os.environ.get("E2E_EMPLOYER_PASSWORD")
+
+CAND = {"email": CAND_EMAIL, "password": CAND_PWD}
+EMP = {"email": EMP_EMAIL, "password": EMP_PWD}
 
 AI_TIMEOUT = 120
 
@@ -32,12 +35,16 @@ def _login(creds):
 
 @pytest.fixture(scope="session")
 def cand_auth():
+    if not CAND_PWD:
+        pytest.skip("E2E_CANDIDATE_PASSWORD not set")
     token, user = _login(CAND)
     return {"headers": {"Authorization": f"Bearer {token}"}, "user": user}
 
 
 @pytest.fixture(scope="session")
 def emp_auth():
+    if not EMP_PWD:
+        pytest.skip("E2E_EMPLOYER_PASSWORD not set")
     token, user = _login(EMP)
     return {"headers": {"Authorization": f"Bearer {token}"}, "user": user}
 
@@ -46,8 +53,10 @@ def emp_auth():
 def stranger_auth():
     """Fresh unrelated candidate for negative messaging test."""
     email = f"TEST_stranger_{uuid.uuid4().hex[:8]}@test.fr"
+    # Use a generated per-run password for this temporary test account
+    pwd = f"StrangerTest_{uuid.uuid4().hex[:8]}"
     payload = {
-        "email": email, "password": "Test1234", "first_name": "TEST",
+        "email": email, "password": pwd, "first_name": "TEST",
         "last_name": "Stranger", "user_type": "candidate",
     }
     r = requests.post(f"{BASE_URL}/api/auth/register", json=payload, timeout=30)

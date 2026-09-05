@@ -1,4 +1,4 @@
-"""Tests P0-002 — aucun seed de démonstration ni admin par défaut en production.
+"""Tests P0-002 / STAB-001B — aucun seed de démonstration ni admin par défaut en production.
 
 Tests isolés (aucune base réelle ni dépendances externes requises) :
 - config.ensure_seeding_allowed() + seed_data.seed_database() : le seed refuse de
@@ -6,6 +6,8 @@ Tests isolés (aucune base réelle ni dépendances externes requises) :
 - scripts/seed_dev.py : refuse la production et ne seede qu'en dev/test ;
 - scripts/create_admin.py : exige ADMIN_INITIAL_PASSWORD (aucun défaut), hash
   avant stockage, ne réécrit jamais un admin existant, ne loggue aucun secret.
+- seed_data.seed_users() : exige SEED_DEMO_PASSWORD (aucun défaut), valide avant
+  toute écriture DB, hash avant stockage.
 """
 
 import importlib.util
@@ -76,10 +78,135 @@ class TestSeedDataUsesGuard:
             called["v"] += 1
 
         monkeypatch.setattr(config, "ensure_seeding_allowed", _fake_guard)
+        monkeypatch.setenv("SEED_DEMO_PASSWORD", "test-password")
         seed = _load_seed_data(monkeypatch, neutralize_db=True)
         import asyncio
         asyncio.run(seed.seed_database())
         assert called["v"] >= 1
+
+    def test_seed_database_refuses_when_seed_password_missing_in_dev(self, monkeypatch):
+        """En development, seed_database() lève si SEED_DEMO_PASSWORD est absent, AVANT toute écriture DB."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.delenv("SEED_DEMO_PASSWORD", raising=False)
+        seed = _load_seed_data(monkeypatch)
+        import asyncio
+        with pytest.raises(RuntimeError) as exc:
+            asyncio.run(seed.seed_database())
+        assert "SEED_DEMO_PASSWORD" in str(exc.value)
+
+
+class TestSeedUsersRequiresEnvPassword:
+    """STAB-001B: seed_users() doit exiger SEED_DEMO_PASSWORD sans fallback."""
+
+    def test_seed_users_refuses_when_env_missing(self, monkeypatch):
+        """Sans SEED_DEMO_PASSWORD, seed_users lève avant toute écriture DB."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.delenv("SEED_DEMO_PASSWORD", raising=False)
+        seed = _load_seed_data(monkeypatch)
+        import asyncio
+        with pytest.raises(RuntimeError) as exc:
+            asyncio.run(seed.seed_users())
+        assert "SEED_DEMO_PASSWORD" in str(exc.value)
+
+    def test_seed_users_accepts_explicit_env_password(self, monkeypatch):
+        """Avec SEED_DEMO_PASSWORD fourni, seed_users hache et stocke."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("SEED_DEMO_PASSWORD", "explicit-seed-pwd-123")
+        
+        stored = {}
+
+        class _FakeUsers:
+            async def update_one(self, query, update, upsert=False):
+                stored["doc"] = update["$setOnInsert"]
+
+        class _FakeDB:
+            users = _FakeUsers()
+
+        async def _get_database():
+            return _FakeDB()
+
+        models_mod = types.ModuleType("models")
+        models_mod.Job = type("Job", (), {})
+        models_mod.Company = type("Company", (), {})
+        models_mod.User = type("User", (), {})
+        models_mod.UserType = type("UserType", (), {"EMPLOYER": "employer", "CANDIDATE": "candidate", "ADMIN": "admin"})
+        models_mod.JobType = type("JobType", (), {"CDI": "CDI", "TITULAIRE": "TITULAIRE"})
+        
+        db_mod = types.ModuleType("database")
+        db_mod.get_database = _get_database
+        
+        # Import the real auth module for hashing
+        import auth
+        auth_mod = types.ModuleType("auth")
+        auth_mod.get_password_hash = auth.get_password_hash
+        
+        monkeypatch.setitem(sys.modules, "models", models_mod)
+        monkeypatch.setitem(sys.modules, "database", db_mod)
+        monkeypatch.setitem(sys.modules, "auth", auth_mod)
+        monkeypatch.setitem(sys.modules, "config", config)
+
+        spec = importlib.util.spec_from_file_location("seed_data_test", BACKEND_DIR / "seed_data.py")
+        seed = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(seed)
+
+        import asyncio
+        asyncio.run(seed.seed_users())
+        
+        # Verify password was hashed (not plaintext)
+        user_doc = stored["doc"]
+        assert user_doc["hashed_password"] != "explicit-seed-pwd-123"
+        assert user_doc["hashed_password"].startswith("$2b$")  # bcrypt hash prefix
+        # Verify it's a valid bcrypt hash by checking it works
+        assert auth.verify_password("explicit-seed-pwd-123", user_doc["hashed_password"])
+
+    def test_seed_users_password_is_hashed_not_plain(self, monkeypatch):
+        """Le mot de passe stocké est un hash bcrypt, jamais en clair."""
+        monkeypatch.setenv("APP_ENV", "development")
+        monkeypatch.setenv("SEED_DEMO_PASSWORD", "test-seed-password")
+        
+        stored = {}
+
+        class _FakeUsers:
+            async def update_one(self, query, update, upsert=False):
+                stored["doc"] = update["$setOnInsert"]
+
+        class _FakeDB:
+            users = _FakeUsers()
+
+        async def _get_database():
+            return _FakeDB()
+
+        models_mod = types.ModuleType("models")
+        models_mod.Job = type("Job", (), {})
+        models_mod.Company = type("Company", (), {})
+        models_mod.User = type("User", (), {})
+        models_mod.UserType = type("UserType", (), {"EMPLOYER": "employer", "CANDIDATE": "candidate", "ADMIN": "admin"})
+        models_mod.JobType = type("JobType", (), {"CDI": "CDI", "TITULAIRE": "TITULAIRE"})
+        
+        db_mod = types.ModuleType("database")
+        db_mod.get_database = _get_database
+        
+        import auth
+        # Don't monkeypatch auth - use the real module for hashing and verification
+        
+        monkeypatch.setitem(sys.modules, "models", models_mod)
+        monkeypatch.setitem(sys.modules, "database", db_mod)
+        monkeypatch.setitem(sys.modules, "config", config)
+
+        spec = importlib.util.spec_from_file_location("seed_data_test", BACKEND_DIR / "seed_data.py")
+        seed = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(seed)
+
+        import asyncio
+        asyncio.run(seed.seed_users())
+        
+        user_doc = stored["doc"]
+        # Verify it's a bcrypt hash (starts with $2b$)
+        assert user_doc["hashed_password"].startswith("$2b$")
+        # Verify it's NOT the plaintext password
+        assert user_doc["hashed_password"] != "test-seed-password"
+        # Verify it verifies correctly using the real auth module
+        assert auth.verify_password("test-seed-password", user_doc["hashed_password"])
 
 
 def _load_seed_data(monkeypatch, neutralize_db=False):
@@ -168,7 +295,9 @@ class TestCreateAdminScript:
         monkeypatch.setenv("ADMIN_INITIAL_PASSWORD", "a-forte-password")
         password = os.environ.get(admin._ADMIN_PASSWORD_ENV)
         assert password == "a-forte-password"
-        assert password not in ("AdminJoboolo2026!", "password123")
+        # Positive invariant: password comes from ADMIN_INITIAL_PASSWORD env var only,
+        # no application default exists in the script. The provided value is passed
+        # directly to hashing/storage (tested in test_hashes_password_before_storage).
 
     def test_hashes_password_before_storage(self, monkeypatch):
         admin = _load_script("create_admin")

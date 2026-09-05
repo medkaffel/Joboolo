@@ -2,31 +2,25 @@
 Covers: auth register/login/PUT me, alerts CRUD + send-now, google/session 401,
 employer flow (company + job create/list/delete)."""
 import os
-import time
 import pytest
 import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
-    # fallback: read from frontend .env
-    try:
-        with open("/app/frontend/.env") as f:
-            for line in f:
-                if line.startswith("REACT_APP_BACKEND_URL="):
-                    BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
-    except FileNotFoundError:
-        pass
-
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
 API = f"{BASE_URL}/api"
 
-CANDIDATE_EMAIL = "candidate@joboolo.fr"
-CANDIDATE_PWD = "Test1234"
-EMPLOYER_EMAIL = "employer@joboolo.fr"
-EMPLOYER_PWD = "Test1234"
+# E2E credentials must come from environment — no repository fallbacks
+CANDIDATE_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@joboolo.fr")
+CANDIDATE_PWD = os.environ.get("E2E_CANDIDATE_PASSWORD")
+EMPLOYER_EMAIL = os.environ.get("E2E_EMPLOYER_EMAIL", "employer@joboolo.fr")
+EMPLOYER_PWD = os.environ.get("E2E_EMPLOYER_PASSWORD")
 
 
 @pytest.fixture(scope="session")
 def candidate_token():
+    if not CANDIDATE_PWD:
+        pytest.skip("E2E_CANDIDATE_PASSWORD not set")
     r = requests.post(f"{API}/auth/login", json={"email": CANDIDATE_EMAIL, "password": CANDIDATE_PWD})
     if r.status_code != 200:
         # try register
@@ -40,6 +34,8 @@ def candidate_token():
 
 @pytest.fixture(scope="session")
 def employer_token():
+    if not EMPLOYER_PWD:
+        pytest.skip("E2E_EMPLOYER_PASSWORD not set")
     r = requests.post(f"{API}/auth/login", json={"email": EMPLOYER_EMAIL, "password": EMPLOYER_PWD})
     if r.status_code != 200:
         r = requests.post(f"{API}/auth/register", json={

@@ -3,19 +3,26 @@ import os
 
 import pytest
 import requests
-from dotenv import dotenv_values
 
-frontend_env = dotenv_values("/app/frontend/.env")
-base_url = os.environ.get("REACT_APP_BACKEND_URL") or frontend_env.get("REACT_APP_BACKEND_URL")
-if not base_url:
-    raise RuntimeError("REACT_APP_BACKEND_URL missing")
-BASE_URL = base_url.rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+if not BASE_URL:
+    pytest.skip("REACT_APP_BACKEND_URL not set", allow_module_level=True)
 API = f"{BASE_URL}/api"
 
-EMPLOYER = ("recruteur@techcorp.fr", "password123", "employer")
-CANDIDATE = ("candidate@test.fr", "password123", "candidate")
-ADMIN = ("admin@joboolo.fr", "AdminJoboolo2026!", "admin")
-PARTNER = ("partenaire@joboolo.fr", "Partner2026!", "partner")
+# E2E credentials must come from environment — no repository fallbacks
+EMPLOYER_EMAIL = os.environ.get("E2E_EMPLOYER_EMAIL", "recruteur@techcorp.fr")
+EMPLOYER_PASSWORD = os.environ.get("E2E_EMPLOYER_PASSWORD")
+CANDIDATE_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@test.fr")
+CANDIDATE_PASSWORD = os.environ.get("E2E_CANDIDATE_PASSWORD")
+ADMIN_EMAIL = os.environ.get("E2E_ADMIN_EMAIL", "admin@joboolo.fr")
+ADMIN_PASSWORD = os.environ.get("E2E_ADMIN_PASSWORD")
+PARTNER_EMAIL = os.environ.get("E2E_PARTNER_EMAIL", "partenaire@joboolo.fr")
+PARTNER_PASSWORD = os.environ.get("E2E_PARTNER_PASSWORD")
+
+EMPLOYER = (EMPLOYER_EMAIL, EMPLOYER_PASSWORD, "employer")
+CANDIDATE = (CANDIDATE_EMAIL, CANDIDATE_PASSWORD, "candidate")
+ADMIN = (ADMIN_EMAIL, ADMIN_PASSWORD, "admin")
+PARTNER = (PARTNER_EMAIL, PARTNER_PASSWORD, "partner")
 
 
 @pytest.fixture(scope="module")
@@ -41,16 +48,22 @@ def _login(client, creds):
 
 @pytest.fixture(scope="module")
 def employer_token(client):
+    if not EMPLOYER_PASSWORD:
+        pytest.skip("E2E_EMPLOYER_PASSWORD not set")
     return _login(client, EMPLOYER)
 
 
 @pytest.fixture(scope="module")
 def candidate_token(client):
+    if not CANDIDATE_PASSWORD:
+        pytest.skip("E2E_CANDIDATE_PASSWORD not set")
     return _login(client, CANDIDATE)
 
 
 @pytest.fixture(scope="module")
 def admin_token(client):
+    if not ADMIN_PASSWORD:
+        pytest.skip("E2E_ADMIN_PASSWORD not set")
     return _login(client, ADMIN)
 
 

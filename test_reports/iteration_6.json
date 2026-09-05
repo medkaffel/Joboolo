@@ -17,7 +17,7 @@
   "seed_data_creation": "One quote request submitted via /recruteur form (TEST QA / TEST_QA_Co / test_qa@example.com). Admin setting recruiter_premium_price temporarily set to 349 then RESET to 299 (verified on /recruteur).",
   "should_call_test_agent_after_fix": false,
   "should_main_agent_self_test": false,
-  "test_credentials": "Admin /adminos: admin@joboolo.fr / AdminJoboolo2026! (dedicated admin login form, not AuthModal). Employer: recruteur@techcorp.fr / password123 with login role '🏢 Recruteur'.",
+  "test_credentials": "Admin /adminos: admin@joboolo.fr / [E2E_ADMIN_PASSWORD] (dedicated admin login form, not AuthModal). Employer: recruteur@techcorp.fr / [E2E_EMPLOYER_PASSWORD] with login role '🏢 Recruteur'.",
   "context_for_next_testing_agent": "Admin dashboard login is a separate form at /adminos (data-testid admin-email/admin-password/admin-login-btn); AuthModal has no Administrateur role option. AuthModal login email/password inputs have no data-testid — use #login-email / #login-password. Recruiter premium price is currently 299 (default) in admin Paramètres (settings-recruiter-price). All 7 requested checks passed in this iteration.",
   "rca_of_the_issue": "N/A - no defects found."
 }

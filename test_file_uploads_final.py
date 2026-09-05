@@ -7,13 +7,19 @@ Tests all scenarios from the review request
 import requests
 import io
 import os
+import sys
 from datetime import datetime
 
-BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://job-platform-next.preview.emergentagent.com')
+BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+if not BACKEND_URL:
+    print("ERROR: REACT_APP_BACKEND_URL environment variable is required but not set.", file=sys.stderr)
+    print("Set REACT_APP_BACKEND_URL to your backend API base URL (e.g., https://api.example.com)", file=sys.stderr)
+    sys.exit(1)
 API_BASE_URL = f"{BACKEND_URL}/api"
 
-CANDIDATE_EMAIL = "candidate@test.fr"
-CANDIDATE_PASSWORD = "password123"
+# Test credentials - must come from environment, no repository fallbacks
+CANDIDATE_EMAIL = os.environ.get("E2E_CANDIDATE_EMAIL", "candidate@test.fr")
+CANDIDATE_PASSWORD = os.environ.get("E2E_CANDIDATE_PASSWORD")
 
 class FinalFileUploadTest:
     def __init__(self):
@@ -57,6 +63,9 @@ startxref
     
     def login(self):
         """Login as candidate"""
+        if not CANDIDATE_PASSWORD:
+            self.log("Login", False, "E2E_CANDIDATE_PASSWORD not set")
+            return False
         try:
             response = self.session.post(f"{API_BASE_URL}/auth/login", 
                                         json={"email": CANDIDATE_EMAIL, "password": CANDIDATE_PASSWORD})
