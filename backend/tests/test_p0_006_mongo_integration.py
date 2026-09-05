@@ -329,8 +329,10 @@ def _job_doc(jid, **kw):
     return d
 
 
-async def _wire(db, module):
+async def _wire(db, module, client=None):
     module.get_database = (lambda: _Awaited(db))
+    if client is not None:
+        module.get_client = lambda: client
 
 
 P0007_MARKER = "p0007_identity_indexes"
@@ -587,7 +589,7 @@ class TestSavedJobsAndApplications:
                 await db.jobs.insert_one(_job_doc("job_paused", campaign_id="paused"))
                 await db.jobs.insert_one(_job_doc("job_active", campaign_id="active"))
                 await _wire(db, saved_jobs_module)
-                await _wire(db, applications_module)
+                await _wire(db, applications_module, client=client)
 
                 cand = _CurrentUser(id="cand_006", user_type="candidate")
 
