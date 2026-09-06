@@ -11,12 +11,29 @@ from email_utils import (
     canonical_email, lookup_user_doc_by_email,
     LookupAggregationError, LookupCollisionError,
 )
+from email_service import build_account_claim_email, send_alert_email
+from config import get_frontend_url
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import httpx
 import pymongo.errors
+import secrets
+import hashlib
+import logging
+from urllib.parse import quote
 
 EMERGENT_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+logger = logging.getLogger(__name__)
+
+
+class AccountClaimRequest(BaseModel):
+    email: str
+
+
+class AccountClaimComplete(BaseModel):
+    token: str
+    password: str
 
 
 class GoogleSessionRequest(BaseModel):
@@ -503,3 +520,246 @@ async def update_current_user(
         social_link_2=updated.get("social_link_2"),
         social_link_3=updated.get("social_link_3"),
     )
+
+
+@router.post("/account-claim/request", status_code=status.HTTP_202_ACCEPTED)
+async def request_account_claim(data: AccountClaimRequest):
+    """Request an account claim link for a candidate account created via alert.
+    
+    Returns 202 with a generic response regardless of eligibility to prevent
+    account enumeration. The email is only sent if the account is eligible.
+    """
+    db = await get_database()
+    
+    # Canonicalize email
+    try:
+        canonical = canonical_email(data.email)
+    except ValueError:
+        # Invalid email format — still return 202 generic
+        return {"message": "Si ce compte est éligible, un email a été envoyé."}
+    
+    # Lookup user document
+    try:
+        user_doc = await lookup_user_doc_by_email(canonical)
+    except (LookupAggregationError, LookupCollisionError):
+        # Fail closed — still return 202 generic
+        return {"message": "Si ce compte est éligible, un email a été envoyé."}
+    
+    generic_response = {"message": "Si ce compte est éligible, un email a été envoyé."}
+    
+    # Check eligibility: must exist, be candidate, active, and have no password
+    if not user_doc:
+        return generic_response
+    
+    if user_doc.get("user_type") != "candidate":
+        return generic_response
+    
+    if not user_doc.get("is_active", True):
+        return generic_response
+    
+    hashed_pw = user_doc.get("hashed_password")
+    if hashed_pw:
+        return generic_response
+    
+    user_id = user_doc["_id"]
+    
+    # Generate secure token and its SHA-256 hash
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    
+    now = datetime.utcnow()
+    expires_at = now + timedelta(minutes=30)
+    
+    # Upsert claim record atomically
+    claim_record = {
+        "_id": user_id,
+        "user_id": user_id,
+        "email": canonical,
+        "token_hash": token_hash,
+        "created_at": now,
+        "expires_at": expires_at,
+    }
+    
+    try:
+        await db.account_claim_tokens.replace_one(
+            {"_id": user_id},
+            claim_record,
+            upsert=True,
+        )
+    except Exception:
+        return generic_response
+    
+    # Build claim link and send email
+    frontend_url = get_frontend_url().rstrip("/")
+    claim_link = f"{frontend_url}/claim-account#token={quote(token)}"
+    subject, html = build_account_claim_email(claim_link)
+    
+    email_sent = False
+    try:
+        email_sent = await send_alert_email(canonical, subject, html)
+    except Exception:
+        email_sent = False
+    
+    # If email failed, clean up the claim record (best-effort, race-safe)
+    if not email_sent:
+        try:
+            await db.account_claim_tokens.delete_one(
+                {"_id": user_id, "token_hash": token_hash}
+            )
+        except Exception:
+            pass
+    
+    return generic_response
+
+
+@router.post("/account-claim/complete", response_model=LoginResponse)
+async def complete_account_claim(data: AccountClaimComplete):
+    """Complete account claim by setting password and verifying the account."""
+    db = await get_database()
+    
+    # Hash the provided token
+    token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+    now = datetime.utcnow()
+    
+    # Lookup valid claim record
+    claim = await db.account_claim_tokens.find_one(
+        {"token_hash": token_hash, "expires_at": {"$gt": now}}
+    )
+    
+    if not claim:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lien de claim invalide ou expiré."
+        )
+    
+    user_id = claim["user_id"]
+    claim_email = claim["email"]
+    
+    # Password policy: reuse UserCreate.password (simple str, no extra rules)
+    password_hash = get_password_hash(data.password)
+    
+    # CAS update on users collection with race-safe email match
+    # Email match must use canonical form equivalent to strip().lower() with $type guard
+    canonical_claim_email = canonical_email(claim_email)
+    
+    # Build the update document
+    update_fields = {
+        "hashed_password": password_hash,
+        "is_verified": True,
+        "updated_at": now,
+    }
+    
+    # Normalize legacy None first_name/last_name to empty strings only if None
+    # We use $cond to only set when the field is null (not when it has a value)
+    # Since we can't easily do conditional $set in a single atomic operation without
+    # aggregation pipeline, we'll use a two-step approach: first check, then update
+    # But the spec requires atomic CAS, so we'll include the normalization in $set
+    # with the understanding that it only overwrites null values.
+    # Actually, we can use $set with a pipeline (update with aggregation pipeline)
+    # to conditionally set only when null. Let's use a standard $set - the spec says
+    # "sans écraser une valeur déjà présente" - we can achieve this by only setting
+    # if the current value is null using a pipeline update.
+    
+    # Use aggregation pipeline for conditional update
+    pipeline = [
+        {"$set": {
+            "hashed_password": password_hash,
+            "is_verified": True,
+            "updated_at": now,
+            "first_name": {
+                "$cond": {
+                    "if": {"$eq": ["$first_name", None]},
+                    "then": "",
+                    "else": "$first_name"
+                }
+            },
+            "last_name": {
+                "$cond": {
+                    "if": {"$eq": ["$last_name", None]},
+                    "then": "",
+                    "else": "$last_name"
+                }
+            },
+        }}
+    ]
+    
+    # Race-safe email match: canonical form with $type guard
+    email_match_filter = {
+        "_id": user_id,
+        "user_type": "candidate",
+        "is_active": True,
+        "$or": [
+            {"hashed_password": {"$in": [None, ""]}},
+            {"hashed_password": {"$exists": False}},
+        ],
+        "$expr": {
+            "$eq": [
+                {"$toLower": {"$trim": {"input": {"$cond": [
+                    {"$eq": [{"$type": "$email"}, "string"]},
+                    "$email",
+                    ""
+                ]}}}},
+                canonical_claim_email
+            ]
+        }
+    }
+    
+    result = await db.users.update_one(email_match_filter, pipeline)
+    
+    if result.matched_count == 0:
+        # CAS failed — cleanup claim and return generic error
+        try:
+            await db.account_claim_tokens.delete_one(
+                {"_id": user_id, "token_hash": token_hash}
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lien de claim invalide ou expiré."
+        )
+    
+    # CAS succeeded — cleanup claim (best-effort)
+    try:
+        await db.account_claim_tokens.delete_one(
+            {"_id": user_id, "token_hash": token_hash}
+        )
+    except Exception:
+        pass
+    
+    # Fetch updated user document
+    updated_doc = await db.users.find_one({"_id": user_id})
+    if not updated_doc:
+        # Should not happen, but fail closed
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lien de claim invalide ou expiré."
+        )
+    
+    # Build LoginResponse
+    user_response = UserResponse(
+        id=updated_doc["_id"],
+        email=updated_doc["email"],
+        first_name=updated_doc["first_name"],
+        last_name=updated_doc["last_name"],
+        user_type=updated_doc["user_type"],
+        phone=updated_doc.get("phone"),
+        location=updated_doc.get("location"),
+        bio=updated_doc.get("bio"),
+        skills=updated_doc.get("skills", []),
+        experience_years=updated_doc.get("experience_years"),
+        is_active=updated_doc["is_active"],
+        is_verified=updated_doc.get("is_verified", False),
+        created_at=updated_doc["created_at"],
+        profile_photo_url=updated_doc.get("profile_photo_url"),
+        social_link_1=updated_doc.get("social_link_1"),
+        social_link_2=updated_doc.get("social_link_2"),
+        social_link_3=updated_doc.get("social_link_3"),
+    )
+    
+    access_token = create_access_token(
+        data={"sub": canonical_email(updated_doc["email"])},
+        expires_delta=timedelta(minutes=30 * 24),
+    )
+    
+    return LoginResponse(user=user_response, token=Token(access_token=access_token))
