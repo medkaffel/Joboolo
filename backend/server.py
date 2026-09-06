@@ -11,6 +11,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 # Import database
 from database import connect_to_mongo, close_mongo_connection
+from config import get_cors_origins
 
 # Import routes
 from routes import auth, jobs, applications, companies, saved_jobs, alerts, files, admin, payments, geo, content, recruiter, ai, messages, analytics, candidate_profiles, candidate_preferences
@@ -74,7 +75,7 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=get_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
