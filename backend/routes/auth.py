@@ -23,6 +23,9 @@ from urllib.parse import quote
 from pymongo import ReturnDocument
 
 
+EMERGENT_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+
 class AccountClaimRequest(BaseModel):
     email: str
 
@@ -627,15 +630,16 @@ async def complete_account_claim(data: AccountClaimComplete):
             detail="Lien de claim invalide ou expiré."
         )
 
+    claim_id = claim.get("_id")
     user_id = claim.get("user_id")
     claim_email = claim.get("email")
 
-    # Malformed internal claim: fail-closed, cleanup only when _id + token_hash determinable
-    if not user_id or not claim_email:
+    # Strict internal claim consistency: _id must exist and equal user_id
+    if not claim_id or not user_id or not claim_email or claim_id != user_id:
         try:
-            if user_id:
+            if claim_id:
                 await db.account_claim_tokens.delete_one(
-                    {"_id": user_id, "token_hash": token_hash}
+                    {"_id": claim_id, "token_hash": token_hash}
                 )
         except Exception:
             pass
@@ -649,7 +653,7 @@ async def complete_account_claim(data: AccountClaimComplete):
     except ValueError:
         try:
             await db.account_claim_tokens.delete_one(
-                {"_id": user_id, "token_hash": token_hash}
+                {"_id": claim_id, "token_hash": token_hash}
             )
         except Exception:
             pass
@@ -664,7 +668,7 @@ async def complete_account_claim(data: AccountClaimComplete):
     # CAS update on users collection with race-safe email match
     # Email match must use canonical form equivalent to strip().lower() with $type guard
     email_match_filter = {
-        "_id": user_id,
+        "_id": claim_id,
         "user_type": "candidate",
         "is_active": True,
         "$or": [
@@ -717,7 +721,7 @@ async def complete_account_claim(data: AccountClaimComplete):
         # CAS failed — cleanup claim and return generic error
         try:
             await db.account_claim_tokens.delete_one(
-                {"_id": user_id, "token_hash": token_hash}
+                {"_id": claim_id, "token_hash": token_hash}
             )
         except Exception:
             pass
@@ -729,7 +733,7 @@ async def complete_account_claim(data: AccountClaimComplete):
     # CAS succeeded — cleanup claim (best-effort)
     try:
         await db.account_claim_tokens.delete_one(
-            {"_id": user_id, "token_hash": token_hash}
+            {"_id": claim_id, "token_hash": token_hash}
         )
     except Exception:
         pass
