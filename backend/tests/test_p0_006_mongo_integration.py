@@ -207,7 +207,8 @@ def _install_scheduler_deps_stub(monkeypatch):
     apscheduler = types.ModuleType("apscheduler")
     apsched_sched = types.ModuleType("apscheduler.schedulers")
     apsched_async = types.ModuleType("apscheduler.schedulers.asyncio")
-    apsched_async.AsyncIOScheduler = lambda: types.SimpleNamespace(
+    apsched_async.AsyncIOScheduler = lambda **kwargs: types.SimpleNamespace(
+        timezone=kwargs.get("timezone"),
         running=False, add_job=lambda *a, **k: None, start=lambda: None)
     apsched_sched.asyncio = apsched_async
     apscheduler.schedulers = apsched_sched
@@ -265,6 +266,19 @@ def scheduler_module(monkeypatch):
     _install_email_stub(monkeypatch)
     _install_scheduler_deps_stub(monkeypatch)
     return _load_module(monkeypatch, "scheduler.py", "p006_scheduler")
+
+
+def test_scheduler_configuration_without_mongo(scheduler_module, monkeypatch):
+    assert scheduler_module.scheduler.timezone == "UTC"
+    calls = []
+    monkeypatch.setattr(scheduler_module.scheduler, "add_job", lambda *a, **k: calls.append("job"))
+    monkeypatch.setattr(scheduler_module.scheduler, "start", lambda: calls.append("start"))
+    monkeypatch.setattr(scheduler_module, "scheduler_enabled", lambda: False)
+    scheduler_module.start_scheduler()
+    assert calls == []
+    monkeypatch.setattr(scheduler_module, "scheduler_enabled", lambda: True)
+    scheduler_module.start_scheduler()
+    assert calls == ["job", "job", "start"]
 
 
 def _mongo_available():
