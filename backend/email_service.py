@@ -284,6 +284,36 @@ def build_partner_welcome_email(company_name: str, app_url: str) -> tuple:
     return subject, html
 
 
+def build_account_claim_email(claim_link: str) -> tuple:
+    """Build account claim email (subject, html) for a candidate claiming their account.
+    
+    The claim_link is a direct security link provided by the caller — never tracked,
+    never uses alert click tracker. No token/hash/password in logs.
+    """
+    subject = "Finalisez votre compte Joboolo"
+    html = f"""
+    <div style="font-family:Arial,sans-serif;background:#f9fafb;padding:24px;">
+      <table width="100%" style="max-width:600px;margin:0 auto;">
+        <tr><td>
+          <h1 style="color:#2563eb;font-size:24px;">Joboolo</h1>
+          <p style="color:#374151;font-size:15px;">Bonjour,</p>
+          <div style="border-left:4px solid #2563eb;padding:12px 16px;background:#fff;border-radius:6px;margin:16px 0;">
+            <p style="color:#111827;font-size:16px;margin:0 0 6px;">Vous avez créé une alerte Joboolo sans compte complet.</p>
+            <p style="color:#6b7280;font-size:14px;margin:0;">Cliquez ci-dessous pour définir votre mot de passe et accéder à votre espace candidat :</p>
+          </div>
+          <a href="{claim_link}" style="display:inline-block;margin-top:8px;background:#2563eb;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;">
+            Définir mon mot de passe
+          </a>
+          <p style="color:#9ca3af;font-size:12px;margin-top:24px;">
+            Ce lien expire dans 30 minutes. Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.
+          </p>
+        </td></tr>
+      </table>
+    </div>
+    """
+    return subject, html
+
+
 async def send_alert_email(recipient_email: str, subject: str, html_content: str) -> bool:
     if not _resend_ready:
         logger.info(f"[email disabled] Would send to {recipient_email}: {subject}")
