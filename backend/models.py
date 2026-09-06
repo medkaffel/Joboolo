@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
 import uuid
@@ -54,6 +54,8 @@ class UserBase(BaseModel):
     experience_years: Optional[int] = None
 
 class UserCreate(UserBase):
+    # Partners use /register-partner (pending approval); admins are provisioned privately.
+    user_type: Literal["candidate", "employer"] = "candidate"
     password: str
     # Provenance (tracking à l'inscription) — optionnel
     signup_source: Optional[str] = None

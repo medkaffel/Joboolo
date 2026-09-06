@@ -298,14 +298,17 @@ async def _authorize_document(db, record: dict, requester: User, path: str):
     if owner_id and owner_id == requester_id:
         return True
 
-    if requester_type == "employer":
-        application = await db.applications.find_one({"cv_url": path})
-        if not application:
+    if requester_type == "employer" and owner_id:
+        # Search all the recruiter's jobs, not an arbitrary first application.
+        # Historical forged references must not grant access to another owner's CV.
+        job_ids = await db.jobs.distinct("_id", {"employer_id": requester_id})
+        if not job_ids:
             return False
-        job = await db.jobs.find_one({"_id": application.get("job_id", "")})
-        if not job:
-            return False
-        return str(job.get("employer_id", "")) == requester_id
+        application = await db.applications.find_one({
+            "cv_url": path, "candidate_id": owner_id,
+            "job_id": {"$in": job_ids},
+        })
+        return application is not None
 
     return False
 

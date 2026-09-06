@@ -45,6 +45,10 @@ class _Coll:
 
     def _match(self, rec, query):
         for k, v in query.items():
+            if isinstance(v, dict) and "$in" in v:
+                if rec.get(k) not in v["$in"]:
+                    return False
+                continue
             if rec.get(k) != v:
                 return False
         return True
@@ -54,6 +58,9 @@ class _Coll:
             if self._match(rec, query):
                 return dict(rec)
         return None
+
+    async def distinct(self, key, query):
+        return list({rec.get(key) for rec in self._records if self._match(rec, query)})
 
 
 class _FakeDB:
@@ -280,6 +287,20 @@ class TestAccessViaDownload:
         with pytest.raises(files_module._HTTPException) as ei:
             _run(files_module, db, _User(OTHER_EMPLOYER, "employer"), PATH_A)
         assert ei.value.status_code == 403
+
+    def test_second_employer_with_same_cv_is_authorized(self, files_module):
+        db = _base_db()
+        db.applications._records.append({**APP_REF_A, "_id": "app_second", "job_id": JOB_OTHER})
+        assert _run(files_module, db, _User(OTHER_EMPLOYER, "employer"), PATH_A).status_code == 200
+
+    def test_forged_candidate_reference_denied(self, files_module):
+        db = _base_db()
+        db.applications._records = [{**APP_REF_A, "candidate_id": CAND_B}]
+        with pytest.raises(files_module._HTTPException) as exc:
+            _run(files_module, db, _User(EMPLOYER, "employer"), PATH_A)
+        assert exc.value.status_code == 403
+        import storage
+        assert storage.CALLS["get_object"] == 0
 
     def test_candidate_document_not_attached_employer_403(self, files_module):
         db = _base_db()

@@ -63,6 +63,9 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 @router.post("/register", response_model=LoginResponse)
 async def register(user_data: UserCreate):
     """Register a new user"""
+    # Also guard direct/internal calls that bypass HTTP model validation.
+    if user_data.user_type not in ("candidate", "employer"):
+        raise HTTPException(status_code=403, detail="Rôle interdit pour l'inscription publique")
     db = await get_database()
     
     # P0-009: canonicalize email

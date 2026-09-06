@@ -607,13 +607,13 @@ class TestSavedJobsAndApplications:
                 assert "job_paused" not in ids
 
                 # apply : 404 sur non diffusible, ok sur visible
-                app_data = _Model(job_id="job_paused")
+                app_data = _Model(job_id="job_paused", cv_url=None)
                 try:
                     await applications_module.apply_to_job(app_data, cand)
                     assert False
                 except _HTTPException as e:
                     assert e.status_code == 404
-                app_data2 = _Model(job_id="job_active")
+                app_data2 = _Model(job_id="job_active", cv_url=None)
                 await applications_module.apply_to_job(app_data2, cand)
                 assert (await db.applications.count_documents({"job_id": "job_active"})) == 1
             finally:

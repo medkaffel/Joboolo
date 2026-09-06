@@ -83,12 +83,16 @@ class FakeDB:
             "applications": {},
             "companies": {},
             "users": {},
+            "files": {},
+            "candidate_documents": {},
         }
         self.jobs = Collection(self, "jobs")
         self.campaigns = Collection(self, "campaigns")
         self.applications = Collection(self, "applications")
         self.companies = Collection(self, "companies")
         self.users = Collection(self, "users")
+        self.files = Collection(self, "files")
+        self.candidate_documents = Collection(self, "candidate_documents")
 
 
 class Session:
@@ -302,3 +306,63 @@ async def test_acl_rejects_non_candidate_before_any_write(monkeypatch, app_data)
     assert exc.value.status_code == 403
     assert db.data["applications"] == {}
     assert db.data["jobs"][JOB_ID]["applications_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collection", ["files", "candidate_documents"])
+async def test_owned_cv_is_checked_in_application_transaction(monkeypatch, collection):
+    db = FakeDB()
+    seed_public_job(db)
+    path = "joboolo/candidates/fake/cv.pdf"
+    db.data[collection]["cv"] = {
+        "_id": "cv", "storage_path": path, "owner_id": CANDIDATE_ID,
+        "is_deleted": False, "category": "cv",
+    }
+    session = Session(db)
+    wire(monkeypatch, db, session)
+    result = await mod.apply_to_job(ApplicationCreate(job_id=JOB_ID, cv_url=path), candidate())
+    assert result.cv_url == path
+    assert any(name == collection and query.get("owner_id") == CANDIDATE_ID
+               for name, query in session.reads)
+    assert len(db.data["applications"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collection", ["files", "candidate_documents"])
+@pytest.mark.parametrize("case", ["foreign", "deleted", "missing", "public"])
+async def test_invalid_cv_never_creates_application_or_counter(monkeypatch, collection, case):
+    db = FakeDB()
+    seed_public_job(db)
+    path = "joboolo/candidates/fake/cv.pdf"
+    doc = {"_id": "cv", "storage_path": path, "owner_id": CANDIDATE_ID,
+           "category": "cv", "is_deleted": False}
+    if case == "foreign":
+        doc["owner_id"] = "another_candidate"
+    elif case == "deleted":
+        doc["is_deleted"] = True
+    elif case == "public":
+        doc["is_public"] = True
+    if case != "missing":
+        db.data[collection]["cv"] = doc
+    wire(monkeypatch, db, Session(db))
+    with pytest.raises(mod.HTTPException) as exc:
+        await mod.apply_to_job(ApplicationCreate(job_id=JOB_ID, cv_url=path), candidate())
+    assert exc.value.status_code == 403
+    assert db.data["applications"] == {}
+    assert db.data["jobs"][JOB_ID]["applications_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cover_letter_cannot_be_attached_as_cv(monkeypatch):
+    db = FakeDB()
+    seed_public_job(db)
+    path = "joboolo/candidates/fake/letter.pdf"
+    db.data["candidate_documents"]["letter"] = {
+        "storage_path": path, "owner_id": CANDIDATE_ID,
+        "category": "cover_letter", "is_deleted": False,
+    }
+    wire(monkeypatch, db, Session(db))
+    with pytest.raises(mod.HTTPException) as exc:
+        await mod.apply_to_job(ApplicationCreate(job_id=JOB_ID, cv_url=path), candidate())
+    assert exc.value.status_code == 403
+    assert not db.data["applications"]

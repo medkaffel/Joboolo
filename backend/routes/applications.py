@@ -138,6 +138,23 @@ async def apply_to_job(
         )
 
     async def _apply_transaction(session):
+        # Never turn a client-supplied document reference into a sharing grant.
+        # Read current ownership/deletion state in the application transaction.
+        if application_data.cv_url:
+            document_query = {
+                "storage_path": application_data.cv_url,
+                "owner_id": candidate_id,
+                "is_deleted": False,
+            }
+            document = await db.files.find_one(document_query, session=session)
+            if document is None:
+                document = await db.candidate_documents.find_one(
+                    {**document_query, "category": "cv"}, session=session,
+                )
+            if (document is None or document.get("is_public")
+                    or document.get("kind") == "profile_photo"):
+                raise HTTPException(status_code=403, detail="CV indisponible ou non autorisé")
+
         job_tx = await db.jobs.find_one(
             {"_id": job_id, "is_active": True},
             session=session,
