@@ -3,14 +3,14 @@ from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import get_frontend_url
+from config import get_frontend_url, scheduler_enabled
 from database import get_database
 from email_service import build_alert_html, send_alert_email
 from campaign_lifecycle import fetch_public_job_filter, is_campaign_diffusible
 
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone="UTC")
 
 # P0-008 : source canonique (config.get_frontend_url) — même défaut que
 # l'historique pour ne pas changer le comportement des emails générés.
@@ -145,6 +145,9 @@ async def refresh_campaign_feeds():
 
 
 def start_scheduler():
+    if not scheduler_enabled():
+        logger.info("[scheduler] Disabled by configuration")
+        return
     if scheduler.running:
         return
     # Daily digest at 08:00 UTC

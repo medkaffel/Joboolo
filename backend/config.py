@@ -17,6 +17,7 @@ strict n'est appelée explicitement qu'au démarrage via validate_startup_config
 """
 
 import os
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Optional
 
@@ -62,6 +63,41 @@ def get_frontend_url() -> str:
 
 class ConfigurationError(RuntimeError):
     """Erreur explicite de configuration P0-001, ne contenant aucun secret."""
+
+
+def get_cors_origins() -> list[str]:
+    """Explicit browser origins; absent configuration denies cross-origin access."""
+    raw = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+    origins = []
+    for item in raw.split(","):
+        origin = item.strip()
+        if not origin:
+            continue
+        try:
+            parsed = urlsplit(origin)
+            valid = (parsed.scheme in ("http", "https") and parsed.hostname
+                     and not parsed.username and not parsed.password
+                     and not parsed.path and not parsed.query and not parsed.fragment
+                     and "*" not in origin and not any(c.isspace() for c in origin))
+            parsed.port  # Validate malformed ports as well.
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ConfigurationError("CORS_ALLOWED_ORIGINS doit contenir des origines HTTP(S) exactes, sans chemin ni wildcard.")
+        if origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+def scheduler_enabled() -> bool:
+    """Tests default to no scheduled side effects; existing other environments stay enabled."""
+    value = os.environ.get("SCHEDULER_ENABLED")
+    if value is None:
+        return not get_settings().is_test
+    value = value.strip().lower()
+    if value not in ("true", "false"):
+        raise ConfigurationError("SCHEDULER_ENABLED doit valoir true ou false.")
+    return value == "true"
 
 
 @dataclass(frozen=True)
@@ -181,6 +217,9 @@ def validate_startup_config() -> Settings:
             "SECRET_KEY est obligatoire dans tous les environnements. "
             "Fournissez-la via l'API des secrets."
         )
+
+    get_cors_origins()
+    scheduler_enabled()
 
     if settings.is_production:
         if not settings.STRIPE_SECRET_KEY:

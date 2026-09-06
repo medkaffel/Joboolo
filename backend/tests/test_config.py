@@ -22,7 +22,7 @@ import config  # noqa: E402
 # et restaurées ciblées pour ne jamais altérer l'environnement du process pytest
 # (ex. PYTEST_CURRENT_TEST / PYTEST_XDIST_WORKER gérés par pytest lui-même).
 _CONFIG_ENV_VARS = ("APP_ENV", "SECRET_KEY", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
-                    "FRONTEND_URL")
+                    "FRONTEND_URL", "CORS_ALLOWED_ORIGINS", "SCHEDULER_ENABLED")
 
 
 @pytest.fixture(autouse=True)
@@ -173,3 +173,44 @@ class TestNoSecretsInErrors:
         msg = str(exc_info.value)
         assert "sk_test_emergent" not in msg  # la valeur n'est pas divulguée
         assert "SECRET_KEY" in msg  # mais le nom de la variable est explicite
+
+
+class TestPreproductionControls:
+    def test_no_cors_origin_by_default(self, monkeypatch):
+        monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
+        assert config.get_cors_origins() == []
+
+    @pytest.mark.parametrize("origin", ["*", "https://*.example.test", "https://user:pass@example.test", "https://example.test/path", "https://example.test?x=1", "https://example.test#x", "ftp://example.test", "https://example.test:bad"])
+    def test_invalid_cors_rejected(self, monkeypatch, origin):
+        monkeypatch.setenv("CORS_ALLOWED_ORIGINS", origin)
+        with pytest.raises(config.ConfigurationError):
+            config.get_cors_origins()
+
+    def test_browser_preflight_exact_origin(self, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from starlette.middleware.cors import CORSMiddleware
+        monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://qa.example.test, http://localhost:3000")
+        app = FastAPI()
+        app.add_middleware(CORSMiddleware, allow_origins=config.get_cors_origins(),
+                           allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+        with TestClient(app) as client:
+            for origin, expected in [("https://qa.example.test", 200), ("http://localhost:3000", 200), ("https://foreign.example.test", 400)]:
+                response = client.options("/", headers={"Origin": origin, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization"})
+                assert response.status_code == expected
+                assert response.headers.get("access-control-allow-origin") == (origin if expected == 200 else None)
+
+    @pytest.mark.parametrize("env,override,expected", [("test", None, False), ("development", None, True), ("production", None, True), ("test", "true", True), ("production", "false", False)])
+    def test_scheduler_switch(self, monkeypatch, env, override, expected):
+        monkeypatch.setenv("APP_ENV", env)
+        monkeypatch.delenv("SCHEDULER_ENABLED", raising=False)
+        if override is not None:
+            monkeypatch.setenv("SCHEDULER_ENABLED", override)
+        assert config.scheduler_enabled() is expected
+
+    def test_scheduler_typo_fails_startup(self, monkeypatch):
+        monkeypatch.setenv("APP_ENV", "test")
+        monkeypatch.setenv("SECRET_KEY", "fictional-test-only")
+        monkeypatch.setenv("SCHEDULER_ENABLED", "flase")
+        with pytest.raises(config.ConfigurationError, match="SCHEDULER_ENABLED"):
+            config.validate_startup_config()
