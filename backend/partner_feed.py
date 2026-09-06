@@ -35,9 +35,9 @@ P0-007 — Identité métier des offres de feed :
 import uuid
 from datetime import datetime, timedelta
 
-import httpx
 from fastapi import HTTPException
 from pymongo.errors import DuplicateKeyError
+from feed_http import fetch_feed_xml, UnsafeFeedURL
 
 VALID_JOB_TYPES = ["CDI", "CDD", "Stage", "Freelance", "Intérim", "Titulaire"]
 _CONTRACT_MAP = {
@@ -324,12 +324,11 @@ async def import_feed(db, partner_id, xml_content=None, *, feed_url=None, cpc=No
         if not src:
             raise HTTPException(status_code=400, detail="Aucun contenu XML ni URL de flux configurée")
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                resp = await client.get(src)
-                resp.raise_for_status()
-                xml_content = resp.text
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Impossible de récupérer le flux: {e}")
+            xml_content = await fetch_feed_xml(src)
+        except UnsafeFeedURL as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Impossible de récupérer le flux XML") from exc
 
     try:
         root = ET.fromstring(xml_content.strip())

@@ -17,27 +17,25 @@ def _iso(v):
     return v.isoformat() if hasattr(v, "isoformat") else v
 
 
-async def _can_message(db, me: User, other_id: str) -> bool:
+async def _can_message(db, me: User, other_id: str, job_id: Optional[str] = None) -> bool:
     if not other_id or me.id == other_id:
         return False
     other = await db.users.find_one({"_id": other_id})
-    if not other:
+    if not other or other.get("is_active") is not True:
         return False
-    existing = await db.messages.find_one({"$or": [
-        {"sender_id": me.id, "recipient_id": other_id},
-        {"sender_id": other_id, "recipient_id": me.id},
-    ]})
-    if existing:
-        return True
-    if me.user_type == "candidate":
-        my_apps = await db.applications.distinct("job_id", {"candidate_id": me.id})
-        if my_apps and await db.jobs.find_one({"_id": {"$in": my_apps}, "employer_id": other_id}):
-            return True
-    if me.user_type in ("employer", "admin"):
-        my_jobs = await db.jobs.distinct("_id", {"employer_id": me.id})
-        if my_jobs and await db.applications.find_one({"job_id": {"$in": my_jobs}, "candidate_id": other_id}):
-            return True
-    return False
+    if me.user_type == "candidate" and other.get("user_type") in ("employer", "admin"):
+        candidate_id, employer_id = me.id, other_id
+    elif me.user_type in ("employer", "admin") and other.get("user_type") == "candidate":
+        candidate_id, employer_id = other_id, me.id
+    else:
+        return False
+    query = {"employer_id": employer_id}
+    if job_id is not None:
+        query["_id"] = job_id
+    jobs = await db.jobs.distinct("_id", query)
+    return bool(jobs and await db.applications.find_one({
+        "candidate_id": candidate_id, "job_id": {"$in": jobs},
+    }))
 
 
 class SendMessage(BaseModel):
@@ -52,7 +50,7 @@ async def send_message(body: SendMessage, current_user: User = Depends(get_curre
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Message vide")
-    if not await _can_message(db, current_user, body.recipient_id):
+    if not await _can_message(db, current_user, body.recipient_id, body.job_id):
         raise HTTPException(status_code=403, detail="Vous ne pouvez pas contacter cet utilisateur")
     now = datetime.now(timezone.utc)
     doc = {
@@ -74,7 +72,10 @@ async def send_message(body: SendMessage, current_user: User = Depends(get_curre
 @router.get("/unread-count")
 async def unread_count(current_user: User = Depends(get_current_active_user)):
     db = await get_database()
-    n = await db.messages.count_documents({"recipient_id": current_user.id, "read": False})
+    query = {"recipient_id": current_user.id, "read": False}
+    senders = await db.messages.distinct("sender_id", query)
+    allowed = [sender for sender in senders if await _can_message(db, current_user, sender)]
+    n = await db.messages.count_documents({**query, "sender_id": {"$in": allowed}})
     return {"count": n}
 
 
@@ -110,6 +111,8 @@ async def conversations(current_user: User = Depends(get_current_active_user)):
     umap = {u["_id"]: u for u in users}
     out = []
     for oid, c in convos.items():
+        if not await _can_message(db, current_user, oid):
+            continue
         u = umap.get(oid, {})
         out.append({
             "other_id": oid,
@@ -127,6 +130,8 @@ async def conversations(current_user: User = Depends(get_current_active_user)):
 @router.get("/thread/{other_id}")
 async def thread(other_id: str, current_user: User = Depends(get_current_active_user)):
     db = await get_database()
+    if not await _can_message(db, current_user, other_id):
+        raise HTTPException(status_code=403, detail="Conversation non autorisée")
     other = await db.users.find_one({"_id": other_id})
     if not other:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable")

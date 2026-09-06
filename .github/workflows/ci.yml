@@ -64,6 +64,9 @@ jobs:
             tests/test_p0_010_manual_job_geocoding.py
             tests/test_p0_013_partner_credit.py
             tests/test_p0_014_applications_atomic.py
+            tests/test_security_public_roles.py
+            tests/test_security_feed_http.py
+            tests/test_security_messages.py
             tests/test_seeding_production.py
             tests/test_ts_a0_contracts.py
             tests/test_ts_a1_candidate_profiles.py
