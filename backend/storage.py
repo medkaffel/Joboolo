@@ -1,59 +1,78 @@
+"""S3-compatible object storage facade for Joboolo.
+
+PREP-01 keeps the historical public contract used by routes/files.py while
+removing the Emergent object-storage dependency. Cloudflare R2 is S3-compatible,
+so the same implementation can also target another S3-compatible provider.
+"""
+
 import os
-import logging
-import requests
 
-logger = logging.getLogger(__name__)
+import boto3
 
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 APP_NAME = "joboolo"
 
-_storage_key = None
+_s3_client = None
+_bucket_name = None
+
+
+def _required_env(name: str) -> str:
+    """Return a required storage setting without ever exposing its value."""
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        raise RuntimeError(f"{name} manquante pour le stockage objet")
+    return value.strip()
 
 
 def init_storage():
-    """Call once; returns a reusable session-scoped storage key."""
-    global _storage_key
-    if _storage_key:
-        return _storage_key
-    emergent_key = os.environ.get("EMERGENT_LLM_KEY")
-    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": emergent_key}, timeout=30)
-    resp.raise_for_status()
-    _storage_key = resp.json()["storage_key"]
-    return _storage_key
+    """Initialize and cache the S3-compatible client.
+
+    Client construction is intentionally side-effect free: connectivity is
+    proven by the first object operation, while startup still validates that
+    every required storage variable is present.
+    """
+    global _s3_client, _bucket_name
+
+    if _s3_client is not None:
+        return _s3_client
+
+    endpoint_url = _required_env("S3_ENDPOINT_URL").rstrip("/")
+    access_key_id = _required_env("S3_ACCESS_KEY_ID")
+    secret_access_key = _required_env("S3_SECRET_ACCESS_KEY")
+    bucket_name = _required_env("S3_BUCKET_NAME")
+    region = (os.environ.get("S3_REGION") or "auto").strip() or "auto"
+
+    _s3_client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key_id,
+        aws_secret_access_key=secret_access_key,
+        region_name=region,
+    )
+    _bucket_name = bucket_name
+    return _s3_client
 
 
 def put_object(path: str, data: bytes, content_type: str) -> dict:
-    key = init_storage()
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data, timeout=120,
+    """Store bytes at the exact historical storage path."""
+    client = init_storage()
+    client.put_object(
+        Bucket=_bucket_name,
+        Key=path,
+        Body=data,
+        ContentType=content_type,
     )
-    if resp.status_code == 403:
-        # key expired -> re-init once
-        globals()["_storage_key"] = None
-        key = init_storage()
-        resp = requests.put(
-            f"{STORAGE_URL}/objects/{path}",
-            headers={"X-Storage-Key": key, "Content-Type": content_type},
-            data=data, timeout=120,
-        )
-    resp.raise_for_status()
-    return resp.json()
+    return {"path": path, "size": len(data)}
 
 
 def get_object(path: str):
-    key = init_storage()
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key}, timeout=60,
-    )
-    if resp.status_code == 403:
-        globals()["_storage_key"] = None
-        key = init_storage()
-        resp = requests.get(
-            f"{STORAGE_URL}/objects/{path}",
-            headers={"X-Storage-Key": key}, timeout=60,
-        )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+    """Return stored bytes and their content type."""
+    client = init_storage()
+    response = client.get_object(Bucket=_bucket_name, Key=path)
+    body = response["Body"]
+    try:
+        content = body.read()
+    finally:
+        close = getattr(body, "close", None)
+        if close:
+            close()
+    return content, response.get("ContentType") or "application/octet-stream"

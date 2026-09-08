@@ -60,6 +60,7 @@ jobs:
             tests/test_cpc_concurrency.py
             tests/test_cpc_stress.py
             tests/test_file_acl.py
+            tests/test_storage.py
             tests/test_p0_008_safe_redirect.py
             tests/test_p0_010_manual_job_geocoding.py
             tests/test_p0_013_partner_credit.py
