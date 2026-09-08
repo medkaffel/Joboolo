@@ -13,7 +13,7 @@ Statut : préparation locale, aucun déploiement ni test externe exécuté.
 - REACT_APP_BACKEND_URL au build frontend : URL backend sans /api.
 - FRONTEND_URL et APP_PUBLIC_URL vers la recette ; router /api/alerts/track sur le domaine frontend vers le backend.
 - ADMIN_EMAIL, SENDER_EMAIL : boîtes de test contrôlées.
-- Confirmer l'isolation du stockage Emergent avant de fournir EMERGENT_LLM_KEY ; même variable utilisée pour l'IA. Le préfixe de stockage reste joboolo.
+- R2 : bucket préproduction privé et dédié ; renseigner S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET_NAME et S3_REGION=auto hors Git. Le préfixe de stockage reste joboolo. EMERGENT_LLM_KEY reste réservé à l'IA et n'est plus utilisé par le stockage.
 - Resend : destinataires contrôlés exclusivement ; sans RESEND_API_KEY, aucune livraison validable.
 - Stripe : clés de test exclusivement, webhook distinct /api/stripe/webhook, aucun paiement réel.
 - Google via Emergent : URL de retour autorisée et compte dédié sans données personnelles de production.
