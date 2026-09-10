@@ -17,7 +17,7 @@ KEYS = {'id','name','search','location','job_type','is_remote','salary_min','fre
 
 def test_subscribe_creates_lightweight_candidate_without_session(setup):
     client, db = setup
-    r = client.post('/alerts/subscribe',json={'email':' PERSON@EXAMPLE.COM ','search':'Python','location':'Paris'})
+    r = client.post('/api/alerts/subscribe',json={'email':' PERSON@EXAMPLE.COM ','search':'Python','location':'Paris'})
     assert r.status_code == 200 and r.headers['content-type'] == 'application/json'
     assert set(r.json()) == {'success','alert_id','created_account'}
     assert r.json()['success'] is True and r.json()['created_account'] is True
@@ -37,7 +37,7 @@ def test_subscribe_reuses_inactive_employer_and_allows_repeated_alerts(setup):
     doc = user_doc(); doc.update(user_type='employer',is_active=False)
     db.users.docs['u1'] = doc
     for _ in range(2):
-        r = client.post('/alerts/subscribe',json={'email':doc['email']})
+        r = client.post('/api/alerts/subscribe',json={'email':doc['email']})
         assert r.status_code == 200 and r.json()['created_account'] is False
     assert db.users.writes == [] and len(db.alerts.writes) == 2
     assert all(d['user_id'] == 'u1' and d['name'] == 'Toutes les offres' for d in db.alerts.docs.values())
@@ -45,25 +45,25 @@ def test_subscribe_reuses_inactive_employer_and_allows_repeated_alerts(setup):
 
 def test_subscribe_current_email_validation_is_only_string(setup):
     client, db = setup
-    r = client.post('/alerts/subscribe',json={'email':'not-an-email'})
+    r = client.post('/api/alerts/subscribe',json={'email':'not-an-email'})
     assert r.status_code == 200 and r.json()['created_account'] is True
     assert next(iter(db.users.docs.values()))['email'] == 'not-an-email'
 
 
 def test_subscribe_lookup_failure_and_missing_field_no_writes(setup,monkeypatch):
     client, db = setup
-    r = client.post('/alerts/subscribe',json={})
+    r = client.post('/api/alerts/subscribe',json={})
     assert r.status_code == 422 and r.json()['detail'][0]['loc'] == ['body','email']
     monkeypatch.setattr(alerts,'lookup_user_doc_by_email',AsyncMock(side_effect=LookupAggregationError()))
-    assert_error(client.post('/alerts/subscribe',json={'email':'person@example.com'}),503,'Email lookup temporarily unavailable, please retry')
+    assert_error(client.post('/api/alerts/subscribe',json={'email':'person@example.com'}),503,'Email lookup temporarily unavailable, please retry')
     assert db.users.writes == db.alerts.writes == []
 
 
 def test_authenticated_create_list_update_delete_shape(setup):
     client, db = setup
     db.users.docs['u1'] = user_doc()
-    assert client.get('/alerts',headers=AUTH).json() == []
-    r = client.post('/alerts',headers=AUTH,json={'search':'Python'})
+    assert client.get('/api/alerts',headers=AUTH).json() == []
+    r = client.post('/api/alerts',headers=AUTH,json={'search':'Python'})
     assert r.status_code == 200 and set(r.json()) == KEYS
     data = r.json(); aid = data['id']
     assert data['name'] == 'Python' and data['frequency'] == 'daily'
@@ -71,13 +71,13 @@ def test_authenticated_create_list_update_delete_shape(setup):
     # Private storage fields are omitted, not serialized as null.
     assert 'user_id' not in data and 'updated_at' not in data
     db.alerts.docs['foreign'] = {**db.alerts.docs[aid],'_id':'foreign','user_id':'u2'}
-    r = client.get('/alerts',headers=AUTH)
+    r = client.get('/api/alerts',headers=AUTH)
     assert r.status_code == 200 and r.json() == [data]
-    r = client.put('/alerts/'+aid,headers=AUTH,json={'name':None,'frequency':'weekly','is_active':False})
+    r = client.put('/api/alerts/'+aid,headers=AUTH,json={'name':None,'frequency':'weekly','is_active':False})
     assert r.status_code == 200 and set(r.json()) == KEYS
     assert r.json()['name'] == 'Python' and r.json()['frequency'] == 'weekly' and r.json()['is_active'] is False
     assert 'name' not in db.alerts.writes[-1][2]['$set']
-    r = client.delete('/alerts/'+aid,headers=AUTH)
+    r = client.delete('/api/alerts/'+aid,headers=AUTH)
     assert r.status_code == 200 and r.json() == {'message':'Alerte supprimée'}
     assert aid not in db.alerts.docs and 'foreign' in db.alerts.docs
 
@@ -88,11 +88,11 @@ def test_ownership_missing_and_foreign_are_identical(setup,method,target):
     client, db = setup
     db.users.docs['u1'] = user_doc()
     db.alerts.docs['foreign'] = {'_id':'foreign','user_id':'u2','created_at':datetime(2026,1,1)}
-    assert_error(client.request(method,'/alerts/'+target,headers=AUTH,json={'name':'Changed'}),404,'Alerte introuvable')
+    assert_error(client.request(method,'/api/alerts/'+target,headers=AUTH,json={'name':'Changed'}),404,'Alerte introuvable')
     assert db.alerts.writes == [] and db.alerts.docs['foreign']['user_id'] == 'u2'
 
 
-@pytest.mark.parametrize('method,path', [('GET','/alerts'),('POST','/alerts'),('PUT','/alerts/a1'),('DELETE','/alerts/a1')])
+@pytest.mark.parametrize('method,path', [('GET','/api/alerts'),('POST','/api/alerts'),('PUT','/api/alerts/a1'),('DELETE','/api/alerts/a1')])
 @pytest.mark.parametrize('headers,status,detail,bearer', [({},403,'Not authenticated',False),({'Authorization':'Bearer invalid'},401,'Could not validate credentials',True)])
 def test_authenticated_routes_auth_errors_no_writes(setup,method,path,headers,status,detail,bearer):
     client, db = setup
@@ -103,6 +103,6 @@ def test_authenticated_routes_auth_errors_no_writes(setup,method,path,headers,st
 def test_update_invalid_frequency_no_write(setup):
     client, db = setup
     db.users.docs['u1'] = user_doc()
-    r = client.put('/alerts/a1',headers=AUTH,json={'frequency':'hourly'})
+    r = client.put('/api/alerts/a1',headers=AUTH,json={'frequency':'hourly'})
     assert r.status_code == 422 and r.json()['detail'][0]['loc'] == ['body','frequency']
     assert db.alerts.writes == []

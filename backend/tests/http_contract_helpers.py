@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -85,16 +85,18 @@ def setup_contract(monkeypatch, domain):
     monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', no_network)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', no_network)
     monkeypatch.setattr(requests.Session, 'request', no_network)
-    app = FastAPI()
+    app = FastAPI(redirect_slashes=False)
+    selected_router = APIRouter()
     if domain == 'auth':
         # Same active PUT ownership as server.py, without importing server/startup.
         for route in auth.router.routes:
             if route.path in ('/auth/register', '/auth/login', '/auth/me'):
                 if not (route.path == '/auth/me' and 'PUT' in route.methods):
-                    app.router.routes.append(route)
-        app.include_router(candidate_profiles.compat_router)
+                    selected_router.routes.append(route)
+        selected_router.include_router(candidate_profiles.compat_router)
     else:
-        app.include_router(alerts.router)
+        selected_router.include_router(alerts.router)
+    app.include_router(selected_router, prefix="/api")
     return TestClient(app), db
 
 
