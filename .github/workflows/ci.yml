@@ -68,6 +68,8 @@ jobs:
             tests/test_security_public_roles.py
             tests/test_http_contract_auth.py
             tests/test_http_contract_alerts.py
+            tests/test_http_contract_jobs.py
+            tests/test_http_contract_applications.py
             tests/test_security_feed_http.py
             tests/test_security_messages.py
             tests/test_seeding_production.py
