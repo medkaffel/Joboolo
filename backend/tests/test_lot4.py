@@ -3,6 +3,7 @@ XML feed mandatory, logos, campaign jobs listing)."""
 import io
 import os
 import re
+import secrets
 import time
 import uuid
 import pytest
@@ -97,7 +98,7 @@ class TestGeoHierarchy:
 # -------- Partner self-registration + pending block --------
 class TestPartnerSelfReg:
     email = f"test_partner_{uuid.uuid4().hex[:8]}@example.com"
-    pwd = "PartnerTest2026!"
+    pwd = secrets.token_urlsafe(32)
     user_id = None
 
     def test_register_partner_returns_pending(self):

@@ -2,6 +2,7 @@
 signup provenance tracking."""
 import os
 import re
+import secrets
 import time
 import uuid
 import pytest
@@ -109,7 +110,7 @@ class TestImpressions:
 # -------- Signup provenance tracking --------
 class TestProvenance:
     email = f"test_prov_{uuid.uuid4().hex[:8]}@example.com"
-    pwd = "TestProv2026!"
+    pwd = secrets.token_urlsafe(32)
     user_id = None
 
     def test_register_with_provenance(self):
