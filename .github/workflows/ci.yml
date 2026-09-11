@@ -87,6 +87,7 @@ jobs:
             tests/test_ts_a9_authorization_grants.py
             tests/test_ts_a10_privacy_lifecycle.py
             tests/test_ts_a11_intent_events.py
+            tests/test_ts_a12_audit_contracts.py
           )
           for suite in "${suites[@]}"; do
             echo "::group::${suite}"
