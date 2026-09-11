@@ -286,3 +286,24 @@ def test_privacy_source_protection_and_anti_opaque_score_invariants_are_frozen()
 
 def test_all_invariants_are_unique():
     assert len(ALL_INVARIANTS) == len(set(ALL_INVARIANTS))
+
+
+def test_company_intent_target_is_separate_from_source_organization():
+    now = datetime.utcnow()
+    event = TalentIntentEvent(
+        event_id=IntentEventId('company-event'), schema_version=SchemaVersion('intent-event-v1'),
+        subject=IntentSubject(candidate_id=CandidateId('candidate-1')),
+        intent_kind=IntentKind.COMPANY, origin=IntentOrigin.DECLARED,
+        event_type=IntentEventType('company_interest_declared'), occurred_at=now, created_at=now,
+        source_type=IntentSourceType('candidate_declared'),
+        source_organization_id=OrganizationId('source'), target_organization_id=OrganizationId('target'),
+    )
+    assert event.target_organization_id == 'target' and event.source_organization_id == 'source'
+    from dataclasses import replace
+    for bad in (None, '', '  ', 42):
+        with pytest.raises(ValueError):
+            replace(event, target_organization_id=bad)
+    for kind in (IntentKind.JOB, IntentKind.ROLE, IntentKind.MARKET):
+        with pytest.raises(ValueError):
+            replace(event, intent_kind=kind)
+        assert replace(event, intent_kind=kind, target_organization_id=None).target_organization_id is None

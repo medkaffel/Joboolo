@@ -91,8 +91,15 @@ class TalentIntentEvent:
     retention_until: Optional[datetime] = None
     correlation_id: Optional[CorrelationId] = None
     causation_id: Optional[CausationId] = None
+    # Company target is distinct from the internal source provenance.
+    target_organization_id: Optional[OrganizationId] = None
 
     def __post_init__(self) -> None:
+        if self.intent_kind == IntentKind.COMPANY:
+            if not isinstance(self.target_organization_id, str) or not self.target_organization_id.strip():
+                raise ValueError("Company Intent requires target_organization_id")
+        elif self.target_organization_id is not None:
+            raise ValueError("target_organization_id is only valid for Company Intent")
         if self.created_at < self.occurred_at:
             raise ValueError("intent event creation cannot predate occurrence")
         if self.retention_until is not None and self.retention_until <= self.occurred_at:
