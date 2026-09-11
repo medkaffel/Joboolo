@@ -144,9 +144,10 @@ async def test_corruption_cannot_be_returned_as_a_successful_retry(db):
     await migrate(db,apply=True)
     bad=event_to_document(event(idempotency_key='key')); bad['permission']=True
     await db.talent_intent_events.insert_one(bad)
+    before=await db.talent_intent_events.find_one({'_id':bad['_id']})
     with pytest.raises(IntentEventConflictError):
         await IntentEventService(db).record(event(idempotency_key='key'))
-    assert await db.talent_intent_events.find_one({'_id':'event-1'})==bad
+    assert await db.talent_intent_events.find_one({'_id':bad['_id']})==before
 
 
 @pytest.mark.asyncio
