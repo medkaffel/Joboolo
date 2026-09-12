@@ -90,6 +90,7 @@ jobs:
             tests/test_ts_a12_audit_contracts.py
             tests/test_ts_a13_index_safety.py
             tests/test_ts_a14_async_outbox.py
+            tests/test_ts_b1_talent_streams.py
           )
           for suite in "${suites[@]}"; do
             echo "::group::${suite}"
@@ -193,6 +194,7 @@ jobs:
           A13_MONGO_URL: mongodb://127.0.0.1:27018/
           A14_REPLICA_SET_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0
           A14_STANDALONE_URL: mongodb://127.0.0.1:27018/
+          B1_MONGO_URL: mongodb://127.0.0.1:27018/
         run: |
           suites=(
             tests/test_cpc_mongo_integration.py
@@ -201,6 +203,7 @@ jobs:
             tests/test_ts_a11_intent_events_mongo.py
             tests/test_ts_a13_index_safety_mongo.py
             tests/test_ts_a14_async_outbox_mongo.py
+            tests/test_ts_b1_talent_streams_mongo.py
           )
           index=0
           for suite in "${suites[@]}"; do

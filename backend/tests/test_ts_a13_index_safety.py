@@ -15,6 +15,10 @@ from domains.talent_stream.index_requirements import TS_INDEX_REQUIREMENTS
 
 
 IDENTITY = safety.IndexRequirement("identity", (("owner", 1), ("version", 1)), True, unique=True)
+A11_REQUIREMENT = next(
+    requirement for requirement in TS_INDEX_REQUIREMENTS
+    if requirement.name == "talent_intent_events"
+)
 
 
 def metadata(requirement):
@@ -141,7 +145,7 @@ def test_missing_performance_index_is_nonfatal():
 def test_empty_and_conforming_snapshots_remain_unchanged():
     empty = {}
     report = safety.verify_metadata(TS_INDEX_REQUIREMENTS, empty, empty)
-    assert not report.ok and len(report.diagnostics) == 13
+    assert not report.ok and len(report.diagnostics) == 14
     assert empty == {}
     collections, indexes = snapshots()
     original = deepcopy((collections, indexes))
@@ -156,14 +160,14 @@ def test_empty_and_conforming_snapshots_remain_unchanged():
     {"viewOn": "other"}, {"collation": {"locale": "en"}}, {"expireAfterSeconds": 60},
 ])
 def test_a11_collection_safety(options):
-    requirements = (TS_INDEX_REQUIREMENTS[-1],)
+    requirements = (A11_REQUIREMENT,)
     collections, indexes = snapshots(requirements)
     collections[requirements[0].name]["options"] = options
     assert not safety.verify_metadata(requirements, collections, indexes).ok
 
 
 def test_redaction_and_extra_a11_index():
-    requirements = (TS_INDEX_REQUIREMENTS[-1],)
+    requirements = (A11_REQUIREMENT,)
     collections, indexes = snapshots(requirements)
     secret = "mongodb://fictional:secret@invalid.test/person@example.test"
     indexes[requirements[0].name][secret] = {
@@ -224,9 +228,11 @@ def test_manifest_matches_shipped_migration_declarations_without_importing_them(
             assert not index.sparse and not index.hidden and index.expire_after_seconds is None
             assert (collection.name, index.name) not in manifest
             manifest[collection.name, index.name] = (index.keys, options)
-    assert len(TS_INDEX_REQUIREMENTS) == 13 and len(manifest) == 32
+    assert len(TS_INDEX_REQUIREMENTS) == 14 and len(manifest) == 32
     assert manifest == shipped
     assert ("recruiter_verifications", "ts_a8_recruiter_verification_state") in manifest
+    b1 = next(item for item in TS_INDEX_REQUIREMENTS if item.name == "talent_streams")
+    assert b1.indexes == () and b1.simple_collation and b1.forbid_extra_indexes
 
 
 @pytest.mark.parametrize("relative", ["mongo_index_safety.py", "domains/talent_stream/index_requirements.py"])
