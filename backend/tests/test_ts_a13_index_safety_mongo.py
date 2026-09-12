@@ -49,10 +49,13 @@ async def db():
             client.close()
 
 
-async def provision(db, *, omit=None, override=None, shape=None):
+async def provision(
+    db, *, omit=None, override=None, shape=None,
+    shape_collection="talent_intent_events",
+):
     """Test-only setup; no migration or application startup is invoked."""
     for collection in TS_INDEX_REQUIREMENTS:
-        options = shape if collection.name == "talent_intent_events" and shape else {}
+        options = shape if collection.name == shape_collection and shape else {}
         await db.create_collection(collection.name, **options)
         if options.get("viewOn") or options.get("timeseries"):
             continue
@@ -88,7 +91,7 @@ async def test_empty_db_remains_empty(db):
     before = await snapshot(db)
     report = await check_database(db)
     assert not report.ok
-    assert len(report.diagnostics) == 13
+    assert len(report.diagnostics) == 14
     assert {d.code for d in report.diagnostics} == {"missing_collection"}
     assert await snapshot(db) == before == {}
 
@@ -104,6 +107,7 @@ async def test_conforming_repeatable_and_bson_documents_unchanged(db):
     before = await snapshot(db)
     first = await check_database(db)
     assert first.ok and first.diagnostics == ()
+    assert set((await db.talent_streams.index_information()).keys()) == {"_id_"}
     assert await check_database(db) == first
     assert await snapshot(db) == before
 
@@ -157,6 +161,33 @@ async def test_a11_collection_contract(db, shape, code):
     before = await snapshot(db)
     report = await check_database(db)
     assert not report.ok and code in {d.code for d in report.diagnostics}
+    assert await snapshot(db) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape,code", [
+    ({"capped": True, "size": 1048576}, "collection_shape"),
+    ({"collation": {"locale": "en", "strength": 2}}, "collection_collation"),
+])
+async def test_b1_collection_contract(db, shape, code):
+    await provision(db, shape=shape, shape_collection="talent_streams")
+    before = await snapshot(db)
+    report = await check_database(db)
+    assert not report.ok and code in {d.code for d in report.diagnostics}
+    assert await snapshot(db) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ttl", [False, True])
+async def test_b1_rejects_every_secondary_index(db, ttl):
+    await provision(db)
+    kwargs = {"expireAfterSeconds": 60} if ttl else {}
+    await db.talent_streams.create_index([("state", 1)], name="unexpected", **kwargs)
+    before = await snapshot(db)
+    report = await check_database(db)
+    assert not report.ok and "unexpected_index" in {d.code for d in report.diagnostics}
+    if ttl:
+        assert "forbidden_ttl" in {d.code for d in report.diagnostics}
     assert await snapshot(db) == before
 
 

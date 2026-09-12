@@ -1,9 +1,9 @@
-"""Shipped A1-A11 metadata contracts, owned by Talent Stream.
+"""Shipped A1-B1 metadata contracts, owned by Talent Stream.
 
-13 authoritative collections, 32 secondary indexes. Unique identities/version
+14 authoritative collections, 32 secondary indexes. Unique identities/version
 constraints are correctness-critical; lookup indexes are performance-only.
 All index provisioning remains explicit-migration-only. No derived collections,
-legacy startup indexes, or future A14 storage is included. A5/A6/A12 add none.
+legacy startup indexes, or A14 storage is included. A5/A6/A12 add none.
 Absent explicit collation inherits the collection default, exactly as the
 existing migrations do; A11 explicitly requires simple collation throughout.
 Expiry lookup indexes are not TTL or authorization rules.
@@ -19,6 +19,11 @@ def _index(name: str, *fields: str, unique: bool = False,
         partial_filter={field: {"$type": "string"} for field in strings} if strings else None,
         collation={"locale": "simple"} if simple else None,
     )
+
+
+TALENT_STREAM_REQUIREMENT = CollectionRequirement(
+    "talent_streams", (), simple_collation=True, forbid_extra_indexes=True,
+)
 
 
 TS_INDEX_REQUIREMENTS = (
@@ -91,4 +96,6 @@ TS_INDEX_REQUIREMENTS = (
         _index("ts_a11_idempotency_key_unique", "idempotency_key", unique=True,
                strings=("idempotency_key",), simple=True),
     ), simple_collation=True, forbid_extra_indexes=True),
+    # TS-B1-001: stable Stream identity is enforced by native _id_ only.
+    TALENT_STREAM_REQUIREMENT,
 )
