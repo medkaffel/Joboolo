@@ -26,11 +26,11 @@ from domains.talent_stream.contracts import (
     RoleDNARef,
     StreamRequirementSnapshot,
 )
+from domains.talent_stream.own_job_source import own_job_source_violation
 
 
 OWN_JOB_MAPPING_VERSION = "ts-b2-own-job-v1"
 _KNOWN_JOB_TYPES = frozenset({"CDI", "CDD", "Stage", "Freelance", "Intérim", "Titulaire"})
-_EXTERNAL_MARKERS = ("partner_id", "campaign_id", "external_url", "external_ref")
 _FINGERPRINT_LISTS = ("requirements", "benefits", "tags")
 
 
@@ -149,11 +149,10 @@ def _validated_source(raw_job, recruiter_id, job_id):
     company_id = _opaque_identifier(raw_job.get("company_id"), "job.company_id")
     title = _nonblank_text(raw_job.get("title"), "job.title")
 
-    if "is_partner" in raw_job and type(raw_job["is_partner"]) is not bool:
+    source_violation = own_job_source_violation(raw_job)
+    if source_violation == "invalid_is_partner":
         raise OwnJobMappingError("job.is_partner must be boolean when present")
-    if raw_job.get("is_partner") is True or any(raw_job.get(key) is not None for key in _EXTERNAL_MARKERS):
-        raise OwnJobMappingError("partner, imported and external jobs are not B2 own-job sources")
-    if raw_job.get("source") not in (None, ""):
+    if source_violation is not None:
         raise OwnJobMappingError("partner, imported and external jobs are not B2 own-job sources")
     if "is_remote" in raw_job and type(raw_job["is_remote"]) is not bool:
         raise OwnJobMappingError("job.is_remote must be boolean when present")
