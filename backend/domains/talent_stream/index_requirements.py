@@ -1,6 +1,6 @@
 """Shipped A1-B1 metadata contracts, owned by Talent Stream.
 
-14 authoritative collections, 32 secondary indexes. Unique identities/version
+14 authoritative collections, 33 secondary indexes. Unique identities/version
 constraints are correctness-critical; lookup indexes are performance-only.
 All index provisioning remains explicit-migration-only. No derived collections,
 legacy startup indexes, or A14 storage is included. A5/A6/A12 add none.
@@ -26,15 +26,34 @@ TALENT_STREAM_REQUIREMENT = CollectionRequirement(
 )
 
 
+CANDIDATE_PREFERENCES_REQUIREMENT = CollectionRequirement(
+    "candidate_preferences",
+    (
+        _index("ts_a2_candidate_preferences_candidate_unique", "candidate_id", unique=True),
+        IndexRequirement(
+            name="ts_b6_discovery_pool_scan",
+            keys=(
+                ("discovery.enabled", 1),
+                ("discovery.allow_compatible_opportunities", 1),
+                ("candidate_id", 1),
+            ),
+            critical=False,
+            partial_filter={
+                "discovery.enabled": True,
+                "discovery.allow_compatible_opportunities": True,
+            },
+        ),
+    ),
+)
+
+
 TS_INDEX_REQUIREMENTS = (
     # migrate_ts_a1_candidate_profiles.py
     CollectionRequirement("candidate_profiles", (
         _index("ts_a1_candidate_id_unique", "candidate_id", unique=True),
     )),
     # migrate_ts_a2_candidate_preferences.py
-    CollectionRequirement("candidate_preferences", (
-        _index("ts_a2_candidate_preferences_candidate_unique", "candidate_id", unique=True),
-    )),
+    CANDIDATE_PREFERENCES_REQUIREMENT,
     # migrate_ts_a3_role_dna_indexes.py
     CollectionRequirement("role_dnas", (
         _index("ts_a3_role_dna_version_unique", "role_dna_id", "version", unique=True),
