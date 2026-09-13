@@ -12,6 +12,7 @@ SCHEMA_VERSION = 'intent-event-v1'
 EVENT_KINDS = {
     'job_interest_declared': IntentKind.JOB,
     'job_favorite_shared_declared': IntentKind.JOB,
+    'job_favorite_share_withdrawn': IntentKind.JOB,
     'job_application_declared': IntentKind.JOB,
     'role_interest_declared': IntentKind.ROLE,
     'company_interest_declared': IntentKind.COMPANY,
