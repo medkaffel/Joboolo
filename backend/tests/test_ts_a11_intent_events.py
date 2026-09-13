@@ -83,6 +83,14 @@ def test_allowed_dimensions_subjects_and_exact_roundtrip(event_type,kind,pseudo)
     assert set(doc)=={'_id','schema_version','subject','intent_kind','origin','event_type','occurred_at','created_at','source_type'} | ({'job_id'} if kind==IntentKind.JOB else {'role_dna_id'} if kind==IntentKind.ROLE else {'target_organization_id'} if kind==IntentKind.COMPANY else set())
 
 
+def test_shared_favorite_withdrawal_is_a_declared_job_event_only():
+    obj = event(event_type='job_favorite_share_withdrawn', intent_kind=IntentKind.JOB)
+    assert event_from_document(event_to_document(obj)) == obj
+    with pytest.raises(ValueError):
+        event_to_document(event(
+            event_type='job_favorite_share_withdrawn', intent_kind=IntentKind.ROLE,
+            job_id=None, role_dna_id='role-1',
+        ))
 def test_all_optional_fields_and_distinct_company_target_provenance():
     obj = event(intent_kind=IntentKind.COMPANY,event_type='company_interest_declared',
                 target_organization_id='target',source_organization_id='source',source_campaign_id='campaign',
