@@ -7,7 +7,10 @@ from domains.intent.service import IntentEventConflictError
 from domains.shared.ids import CandidateId, IntentSourceType, IntentEventType, JobId
 from domains.shared.versioning import SchemaVersion
 from domains.talent_stream.declared_interest_models import DeclareJobInterestCommand
-from domains.talent_stream.declared_interest_repository import DeclaredInterestRepository
+from domains.talent_stream.declared_interest_repository import (
+    DeclaredInterestRepository,
+    canonical_campaign_id,
+)
 from domains.talent_stream.events import (
     IntentKind,
     IntentOrigin,
@@ -144,8 +147,13 @@ class DeclaredInterestService:
                 "Job is not eligible for declared interest"
             )
         campaign = None
-        campaign_id = job.get("campaign_id")
-        if campaign_id:
+        if "campaign_id" in job and job["campaign_id"] is not None:
+            try:
+                campaign_id = canonical_campaign_id(job["campaign_id"])
+            except ValueError:
+                raise DeclaredInterestJobNotEligibleError(
+                    "Job is not eligible for declared interest"
+                ) from None
             campaign = await self.repository.get_campaign(campaign_id)
 
         occurred_at = _server_utc_millisecond(self.clock)

@@ -216,6 +216,29 @@ async def test_non_diffusable_campaign_refuses_only_a_new_command(db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("campaign_id", [
+    pytest.param({"$ne": None}, id="mongo-operator-document"),
+    pytest.param("", id="empty-string"),
+])
+async def test_malformed_campaign_id_is_rejected_without_any_write(db, campaign_id):
+    current = await seed(db)
+    await db.campaigns.insert_one({
+        "_id": "arbitrary-active-campaign", "status": "active",
+    })
+    await db.jobs.update_one(
+        {"_id": "job-1"}, {"$set": {"campaign_id": campaign_id}},
+    )
+    protected = ("users", "jobs", "campaigns")
+    before = await snapshot(db, protected)
+    with pytest.raises(DeclaredInterestJobNotEligibleError):
+        await current.declare(
+            "candidate-1", "job-1", caller_idempotency_key="command-1",
+        )
+    assert await db.talent_intent_events.count_documents({}) == 0
+    assert await snapshot(db, protected) == before
+
+
+@pytest.mark.asyncio
 async def test_corrupt_existing_a11_event_fails_closed_without_repair(db):
     current = await seed(db)
     result = await current.declare(

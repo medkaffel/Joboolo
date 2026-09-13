@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from bson import ObjectId
 
 from domains.intent.serialization import event_to_document
 from domains.intent.service import IntentEventConflictError
@@ -19,6 +20,9 @@ from domains.talent_stream.declared_interest_repository import (
     CAMPAIGN_FIELDS,
     JOB_FIELDS,
     USER_FIELDS,
+    DeclaredInterestRepository,
+    DeclaredInterestRepositoryError,
+    canonical_campaign_id,
 )
 from domains.talent_stream.declared_interest_service import (
     DeclaredInterestAccessError,
@@ -184,6 +188,85 @@ async def test_required_campaign_must_be_currently_diffusable(campaign):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("campaign_id", [
+    pytest.param("", id="empty-string"),
+    pytest.param("   ", id="whitespace-only"),
+    pytest.param(" campaign-1", id="leading-whitespace"),
+    pytest.param("campaign-1 ", id="trailing-whitespace"),
+    pytest.param(False, id="false"),
+    pytest.param(True, id="true"),
+    pytest.param(0, id="zero"),
+    pytest.param(1, id="one"),
+    pytest.param(1.0, id="float"),
+    pytest.param({"$ne": None}, id="mongo-operator-document"),
+    pytest.param(["campaign-1"], id="list"),
+    pytest.param(("campaign-1",), id="tuple"),
+    pytest.param(ObjectId("68c580000000000000000001"), id="object-id"),
+])
+async def test_malformed_campaign_id_is_refused_before_any_campaign_read(campaign_id):
+    repo = Repository()
+    repo.jobs["job-1"]["campaign_id"] = campaign_id
+    with pytest.raises(DeclaredInterestJobNotEligibleError):
+        await service(repo).declare(
+            "candidate-1", "job-1", caller_idempotency_key="command-1",
+        )
+    assert repo.campaign_reads == []
+    assert repo.events == {}
+    assert repo.insert_attempts == 0
+
+
+@pytest.mark.parametrize("campaign_id", [
+    "campaign-1", "campaign:opaque/one", "campagne-é",
+])
+def test_campaign_id_validator_preserves_canonical_opaque_strings(campaign_id):
+    assert canonical_campaign_id(campaign_id) == campaign_id
+
+
+@pytest.mark.asyncio
+async def test_repository_rejects_mongo_operator_campaign_id_before_database_access():
+    class NoCampaignAccess:
+        @property
+        def campaigns(self):
+            raise AssertionError("campaigns collection must not be accessed")
+
+    repository = object.__new__(DeclaredInterestRepository)
+    repository.db = NoCampaignAccess()
+    with pytest.raises(DeclaredInterestRepositoryError):
+        await repository.get_campaign({"$ne": None})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("job", [
+    {"_id": "job-1", "is_active": True},
+    {"_id": "job-1", "is_active": True, "campaign_id": None},
+])
+async def test_absent_or_none_campaign_id_is_the_only_campaignless_job_shape(job):
+    repo = Repository()
+    repo.jobs["job-1"] = job
+    result = await service(repo).declare(
+        "candidate-1", "job-1", caller_idempotency_key="command-1",
+    )
+    assert result.job_id == "job-1"
+    assert repo.campaign_reads == []
+    assert len(repo.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_canonical_campaign_id_with_diffusable_campaign_is_eligible():
+    repo = Repository()
+    repo.jobs["job-1"]["campaign_id"] = "campaign-1"
+    repo.campaigns["campaign-1"] = {
+        "_id": "campaign-1", "status": "active",
+    }
+    result = await service(repo).declare(
+        "candidate-1", "job-1", caller_idempotency_key="command-1",
+    )
+    assert result.job_id == "job-1"
+    assert repo.campaign_reads == ["campaign-1"]
+    assert len(repo.events) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("extra", [
     {},
     {"source": "monster.fr", "employer_id": "missing-source-account"},
@@ -264,6 +347,23 @@ async def test_retry_still_requires_a_current_active_candidate():
             "candidate-1", "job-1", caller_idempotency_key="command-1",
         )
     assert repo.job_reads == [] and repo.insert_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_never_reads_a_later_malformed_campaign_id():
+    repo = Repository()
+    first = await service(repo).declare(
+        "candidate-1", "job-1", caller_idempotency_key="command-1",
+    )
+    repo.jobs["job-1"]["campaign_id"] = {"$ne": None}
+    repo.job_reads.clear()
+    repo.campaign_reads.clear()
+    second = await service(repo).declare(
+        "candidate-1", "job-1", caller_idempotency_key="command-1",
+    )
+    assert second == first
+    assert repo.job_reads == [] and repo.campaign_reads == []
+    assert repo.insert_attempts == 1
 
 
 @pytest.mark.asyncio

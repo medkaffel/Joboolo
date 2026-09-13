@@ -26,6 +26,17 @@ CAMPAIGN_FIELDS = {
 }
 
 
+def canonical_campaign_id(value):
+    """Validate an opaque Campaign ID without changing its representation."""
+    if (
+        type(value) is not str
+        or not value
+        or any(character.isspace() for character in value)
+    ):
+        raise ValueError("campaign_id must be a canonical string identifier")
+    return value
+
+
 class DeclaredInterestRepositoryError(RuntimeError):
     pass
 
@@ -84,6 +95,12 @@ class DeclaredInterestRepository:
             ) from None
 
     async def get_campaign(self, campaign_id):
+        try:
+            campaign_id = canonical_campaign_id(campaign_id)
+        except ValueError:
+            raise DeclaredInterestRepositoryError(
+                "declared-interest campaign identifier is invalid"
+            ) from None
         try:
             return await self.db.campaigns.find_one(
                 {"_id": campaign_id}, CAMPAIGN_FIELDS,
