@@ -93,6 +93,7 @@ jobs:
             tests/test_ts_b1_talent_streams.py
             tests/test_ts_b2_own_job_requirement.py
             tests/test_ts_b3_application_source.py
+            tests/test_ts_b4_declared_interest.py
           )
           for suite in "${suites[@]}"; do
             echo "::group::${suite}"
@@ -199,6 +200,7 @@ jobs:
           B1_MONGO_URL: mongodb://127.0.0.1:27018/
           B2_MONGO_URL: mongodb://127.0.0.1:27018/
           B3_MONGO_URL: mongodb://127.0.0.1:27018/
+          B4_MONGO_URL: mongodb://127.0.0.1:27018/
         run: |
           suites=(
             tests/test_cpc_mongo_integration.py
@@ -210,6 +212,7 @@ jobs:
             tests/test_ts_b1_talent_streams_mongo.py
             tests/test_ts_b2_own_job_requirement_mongo.py
             tests/test_ts_b3_application_source_mongo.py
+            tests/test_ts_b4_declared_interest_mongo.py
           )
           index=0
           for suite in "${suites[@]}"; do
