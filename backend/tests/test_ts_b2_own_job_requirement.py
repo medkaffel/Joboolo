@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from bson.int64 import Int64
 from pymongo.errors import DuplicateKeyError
 
 from domains.opportunities.models import OpportunityFactSource, OpportunitySpecStatus
@@ -21,7 +22,11 @@ from domains.talent_stream.own_job_repository import (
     OwnJobAccessError,
     OwnJobReadinessError,
 )
-from domains.talent_stream.own_job_service import OwnJobRequirementService
+from domains.talent_stream.own_job_service import (
+    OwnJobRequirementService,
+    _role_document,
+    _strictly_equal,
+)
 
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -113,8 +118,9 @@ def test_malformed_source_fails_closed(changes):
     ("campaign_id", "campaign-1"),
     ("external_url", "https://example.test/job"),
     ("external_ref", "external-1"),
+    ("source", "monster.fr"),
 ])
-def test_every_partner_or_external_marker_is_rejected(marker, value):
+def test_every_partner_imported_or_external_marker_is_rejected(marker, value):
     with pytest.raises(OwnJobMappingError, match="partner, imported and external"):
         prepare_own_job_requirement(job(**{marker: value}), "recruiter-1", "command-1", NOW)
 
@@ -131,6 +137,31 @@ def test_identity_fingerprint_and_ids_are_deterministic_and_scoped():
     )
     with pytest.raises(OwnJobMappingError):
         deterministic_own_job_ids("recruiter-1", "job-1", " ")
+
+
+@pytest.mark.parametrize("position,spaced", [
+    (0, " recruiter-1 "),
+    (1, " job-1 "),
+    (2, " command-1 "),
+])
+def test_opaque_identifier_representation_never_collapses_to_same_scope(position, spaced):
+    baseline = ["recruiter-1", "job-1", "command-1"]
+    changed = list(baseline)
+    changed[position] = spaced
+    assert deterministic_own_job_ids(*changed) != deterministic_own_job_ids(*baseline)
+
+
+def test_recursive_exact_comparison_accepts_mongo_integer_without_numeric_coercion():
+    expected = {"nested": [{"version": 1, "enabled": False}]}
+    assert _strictly_equal(
+        {"nested": [{"version": Int64(1), "enabled": False}]}, expected,
+    )
+    assert not _strictly_equal(
+        {"nested": [{"version": True, "enabled": False}]}, expected,
+    )
+    assert not _strictly_equal(
+        {"nested": [{"version": 1.0, "enabled": False}]}, expected,
+    )
 
 
 class Cursor:
@@ -224,6 +255,63 @@ async def test_partial_pair_is_completed_only_by_exact_retry():
     result = await service.prepare("recruiter-1", "job-1", command_id="command-1")
     assert result.requirement_snapshot.captured_at == NOW
     assert len(db.role_dnas.documents) == len(db.opportunity_specs.documents) == 1
+
+
+@pytest.mark.asyncio
+async def test_owned_monster_import_is_rejected_without_a3_a4_write():
+    db = DB(source=job(source="monster.fr"))
+    with pytest.raises(OwnJobMappingError, match="partner, imported and external"):
+        await OwnJobRequirementService(db).prepare(
+            "recruiter-1", "job-1", command_id="command-1", captured_at=NOW,
+        )
+    assert db.role_dnas.documents == []
+    assert db.opportunity_specs.documents == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_amount", [True, 1.0])
+async def test_mistyped_existing_opportunity_conflicts_without_corrective_write(invalid_amount):
+    db = DB(source=job(salary_min=1))
+    service = OwnJobRequirementService(db)
+    await service.prepare("recruiter-1", "job-1", command_id="command-1", captured_at=NOW)
+    db.opportunity_specs.documents[0]["compensation"]["minimum"] = invalid_amount
+    before = (deepcopy(db.role_dnas.documents), deepcopy(db.opportunity_specs.documents))
+    with pytest.raises(OwnJobSourceConflictError):
+        await service.prepare("recruiter-1", "job-1", command_id="command-1")
+    assert (db.role_dnas.documents, db.opportunity_specs.documents) == before
+
+
+@pytest.mark.asyncio
+async def test_mistyped_existing_role_conflicts_without_corrective_write():
+    db = DB()
+    service = OwnJobRequirementService(db)
+    await service.prepare("recruiter-1", "job-1", command_id="command-1", captured_at=NOW)
+    db.role_dnas.documents[0]["aliases"] = "not-a-sequence"
+    before = (deepcopy(db.role_dnas.documents), deepcopy(db.opportunity_specs.documents))
+    with pytest.raises(OwnJobSourceConflictError):
+        await service.prepare("recruiter-1", "job-1", command_id="command-1")
+    assert (db.role_dnas.documents, db.opportunity_specs.documents) == before
+
+
+@pytest.mark.asyncio
+async def test_losing_captured_at_race_conflicts_before_opportunity_write(monkeypatch):
+    db = DB()
+    service = OwnJobRequirementService(db)
+    winner = prepare_own_job_requirement(job(), "recruiter-1", "command-1", NOW)
+
+    async def concurrent_winner(_preparation):
+        document = _role_document(winner.role_dna)
+        db.role_dnas.documents.append(deepcopy(document))
+        return deepcopy(document)
+
+    monkeypatch.setattr(service, "_role", concurrent_winner)
+    with pytest.raises(OwnJobSourceConflictError, match="captured_at"):
+        await service.prepare(
+            "recruiter-1", "job-1", command_id="command-1",
+            captured_at=NOW + timedelta(seconds=1),
+        )
+    assert len(db.role_dnas.documents) == 1
+    assert db.opportunity_specs.documents == []
 
 
 @pytest.mark.asyncio

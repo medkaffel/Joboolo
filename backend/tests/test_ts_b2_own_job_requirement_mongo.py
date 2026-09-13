@@ -156,8 +156,9 @@ async def test_exact_mapping_retry_and_concurrency_converge_without_source_mutat
     ({"employer_id": "other-recruiter"}, OwnJobAccessError),
     ({"is_partner": True}, OwnJobMappingError),
     ({"external_url": "https://example.test/job"}, OwnJobMappingError),
+    ({"source": "monster.fr"}, OwnJobMappingError),
 ])
-async def test_unowned_partner_and_external_sources_leave_targets_empty(db, change, error):
+async def test_unowned_partner_imported_and_external_sources_leave_targets_empty(db, change, error):
     service = await provision(db, job=source_job(**change))
     with pytest.raises(error):
         await service.prepare(
@@ -202,6 +203,54 @@ async def test_same_command_changed_source_conflicts_but_new_command_creates_new
     assert second.requirement_snapshot.role_dna != first.requirement_snapshot.role_dna
     assert await db.role_dnas.count_documents({}) == 2
     assert await db.opportunity_specs.count_documents({}) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_amount", [True, 1.0])
+async def test_mistyped_existing_opportunity_conflicts_without_corrective_write(db, invalid_amount):
+    service = await provision(db, job=source_job(salary_min=1))
+    await service.prepare(
+        "recruiter-1", "job-1", command_id="command-1", captured_at=NOW,
+    )
+    await db.opportunity_specs.update_one(
+        {}, {"$set": {"compensation.minimum": invalid_amount}},
+    )
+    before = await target_bson(db)
+    with pytest.raises(OwnJobSourceConflictError):
+        await service.prepare("recruiter-1", "job-1", command_id="command-1")
+    assert await target_bson(db) == before
+
+
+@pytest.mark.asyncio
+async def test_mistyped_existing_role_conflicts_without_corrective_write(db):
+    service = await provision(db)
+    await service.prepare(
+        "recruiter-1", "job-1", command_id="command-1", captured_at=NOW,
+    )
+    await db.role_dnas.update_one({}, {"$set": {"aliases": "not-a-sequence"}})
+    before = await target_bson(db)
+    with pytest.raises(OwnJobSourceConflictError):
+        await service.prepare("recruiter-1", "job-1", command_id="command-1")
+    assert await target_bson(db) == before
+
+
+@pytest.mark.asyncio
+async def test_concurrent_distinct_captured_at_has_one_winner_and_no_extra_pair(db):
+    service = await provision(db)
+    results = await asyncio.gather(
+        service.prepare(
+            "recruiter-1", "job-1", command_id="command-1", captured_at=NOW,
+        ),
+        service.prepare(
+            "recruiter-1", "job-1", command_id="command-1",
+            captured_at=NOW + timedelta(seconds=1),
+        ),
+        return_exceptions=True,
+    )
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    assert sum(isinstance(result, OwnJobSourceConflictError) for result in results) == 1
+    assert await db.role_dnas.count_documents({}) == 1
+    assert await db.opportunity_specs.count_documents({}) == 1
 
 
 @pytest.mark.asyncio

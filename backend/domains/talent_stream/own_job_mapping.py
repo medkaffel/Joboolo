@@ -50,10 +50,17 @@ class OwnJobPreparation:
     requirement_snapshot: StreamRequirementSnapshot
 
 
-def _nonblank(value, field_name):
+def _nonblank_text(value, field_name):
     if type(value) is not str or not value.strip():
         raise OwnJobMappingError(f"{field_name} must be a nonblank string")
     return value.strip()
+
+
+def _opaque_identifier(value, field_name):
+    """Validate an A0 opaque ID without changing its representation."""
+    if type(value) is not str or not value.strip():
+        raise OwnJobMappingError(f"{field_name} must be a nonblank string")
+    return value
 
 
 def _optional_text(source, field_name):
@@ -115,9 +122,9 @@ def _digest(payload):
 
 
 def deterministic_own_job_ids(recruiter_id, job_id, command_id):
-    recruiter_id = _nonblank(recruiter_id, "recruiter_id")
-    job_id = _nonblank(job_id, "job_id")
-    command_id = _nonblank(command_id, "command_id")
+    recruiter_id = _opaque_identifier(recruiter_id, "recruiter_id")
+    job_id = _opaque_identifier(job_id, "job_id")
+    command_id = _opaque_identifier(command_id, "command_id")
     identity = _digest({
         "command_id": command_id,
         "job_id": job_id,
@@ -133,18 +140,20 @@ def deterministic_own_job_ids(recruiter_id, job_id, command_id):
 def _validated_source(raw_job, recruiter_id, job_id):
     if not isinstance(raw_job, Mapping):
         raise OwnJobMappingError("own job source must be a mapping")
-    recruiter_id = _nonblank(recruiter_id, "recruiter_id")
-    job_id = _nonblank(job_id, "job_id")
-    if _nonblank(raw_job.get("_id"), "job._id") != job_id:
+    recruiter_id = _opaque_identifier(recruiter_id, "recruiter_id")
+    job_id = _opaque_identifier(job_id, "job_id")
+    if _opaque_identifier(raw_job.get("_id"), "job._id") != job_id:
         raise OwnJobMappingError("job identity mismatch")
-    if _nonblank(raw_job.get("employer_id"), "job.employer_id") != recruiter_id:
+    if _opaque_identifier(raw_job.get("employer_id"), "job.employer_id") != recruiter_id:
         raise OwnJobMappingError("job is not owned by the requesting recruiter")
-    company_id = _nonblank(raw_job.get("company_id"), "job.company_id")
-    title = _nonblank(raw_job.get("title"), "job.title")
+    company_id = _opaque_identifier(raw_job.get("company_id"), "job.company_id")
+    title = _nonblank_text(raw_job.get("title"), "job.title")
 
     if "is_partner" in raw_job and type(raw_job["is_partner"]) is not bool:
         raise OwnJobMappingError("job.is_partner must be boolean when present")
     if raw_job.get("is_partner") is True or any(raw_job.get(key) is not None for key in _EXTERNAL_MARKERS):
+        raise OwnJobMappingError("partner, imported and external jobs are not B2 own-job sources")
+    if raw_job.get("source") not in (None, ""):
         raise OwnJobMappingError("partner, imported and external jobs are not B2 own-job sources")
     if "is_remote" in raw_job and type(raw_job["is_remote"]) is not bool:
         raise OwnJobMappingError("job.is_remote must be boolean when present")
@@ -194,9 +203,9 @@ def prepare_own_job_requirement(raw_job, recruiter_id, command_id, captured_at):
     """Return deterministic draft A3/A4 values and the exact B1 snapshot."""
     if not isinstance(raw_job, Mapping):
         raise OwnJobMappingError("own job source must be a mapping")
-    job_id = _nonblank(raw_job.get("_id"), "job._id")
-    recruiter_id = _nonblank(recruiter_id, "recruiter_id")
-    command_id = _nonblank(command_id, "command_id")
+    job_id = _opaque_identifier(raw_job.get("_id"), "job._id")
+    recruiter_id = _opaque_identifier(recruiter_id, "recruiter_id")
+    command_id = _opaque_identifier(command_id, "command_id")
     source = _validated_source(raw_job, recruiter_id, job_id)
     captured_at = _utc_millisecond(captured_at)
     source_fingerprint = own_job_source_fingerprint(raw_job, recruiter_id, job_id)

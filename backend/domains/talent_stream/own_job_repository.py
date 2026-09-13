@@ -33,6 +33,7 @@ _JOB_FIELDS = {
     "campaign_id": 1,
     "external_url": 1,
     "external_ref": 1,
+    "source": 1,
 }
 
 

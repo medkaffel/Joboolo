@@ -1,4 +1,5 @@
 """TS-B2 orchestration for preparing A3/A4 refs from one owned Job."""
+from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -75,22 +76,37 @@ def _serialize(value):
     return value
 
 
-def _canonical(value):
-    if type(value) is datetime:
-        return _stored_utc_millisecond(value).isoformat(timespec="milliseconds")
-    if isinstance(value, dict):
-        return {key: _canonical(item) for key, item in sorted(value.items())}
-    if isinstance(value, (list, tuple)):
-        return [_canonical(item) for item in value]
-    return value
+def _strictly_equal(actual, expected):
+    """Compare stored BSON recursively without Python numeric coercion."""
+    if type(expected) is datetime:
+        try:
+            return _stored_utc_millisecond(actual) == _stored_utc_millisecond(expected)
+        except OwnJobSourceConflictError:
+            return False
+    if expected is None or type(expected) is bool:
+        return type(actual) is type(expected) and actual == expected
+    if isinstance(expected, int):
+        return isinstance(actual, int) and not isinstance(actual, bool) and int(actual) == int(expected)
+    if type(expected) is float:
+        return type(actual) is float and actual == expected
+    if isinstance(expected, Mapping):
+        return (
+            isinstance(actual, Mapping)
+            and actual.keys() == expected.keys()
+            and all(_strictly_equal(actual[key], expected[key]) for key in expected)
+        )
+    if isinstance(expected, Sequence) and not isinstance(expected, (str, bytes, bytearray)):
+        return (
+            isinstance(actual, Sequence)
+            and not isinstance(actual, (str, bytes, bytearray))
+            and len(actual) == len(expected)
+            and all(_strictly_equal(left, right) for left, right in zip(actual, expected))
+        )
+    return type(actual) is type(expected) and actual == expected
 
 
 def _require_exact(actual, expected):
-    try:
-        same = _canonical(actual) == _canonical(expected)
-    except OwnJobSourceConflictError:
-        same = False
-    if not same:
+    if not _strictly_equal(actual, expected):
         raise OwnJobSourceConflictError("existing B2 record conflicts with source command")
 
 
@@ -141,6 +157,7 @@ class OwnJobRequirementService:
             _now_millisecond() if existing_role is None
             else _stored_utc_millisecond(existing_role.get("created_at"))
         )
+        supplied = None
         if captured_at is not None:
             supplied = _stored_utc_millisecond(captured_at)
             if existing_role is not None and supplied != stable_time:
@@ -153,6 +170,8 @@ class OwnJobRequirementService:
         role_doc = existing_role if existing_role is not None else await self._role(preparation)
 
         persisted_time = _stored_utc_millisecond(role_doc.get("created_at"))
+        if supplied is not None and supplied != persisted_time:
+            raise OwnJobSourceConflictError("captured_at conflicts with existing B2 command")
         preparation = prepare_own_job_requirement(
             raw_job, recruiter_id, command_id, persisted_time,
         )
