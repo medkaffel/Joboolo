@@ -36,6 +36,7 @@ class ApplicationSourceConflictError(RuntimeError):
 
 @dataclass(frozen=True, slots=True, repr=False)
 class _SecuredScope:
+    stream_id: str
     job_id: str
     fingerprint: tuple
 
@@ -188,6 +189,7 @@ class ApplicationSourceService:
             raise ApplicationSourceAccessError("application source not authorized")
 
         return _SecuredScope(
+            stream_id=stream_id,
             job_id=job_id,
             fingerprint=(
                 recruiter_id,
@@ -219,6 +221,10 @@ class ApplicationSourceService:
 
         await self.repository.readiness()
         before = await self._scope(recruiter_id, stream_id)
+        if after is not None and (
+            after.stream_id != before.stream_id or after.job_id != before.job_id
+        ):
+            raise ValueError("application source cursor does not match scope")
         documents = await self.repository.list_applications(
             before.job_id, after=after, limit=limit,
         )

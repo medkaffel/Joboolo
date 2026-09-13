@@ -269,11 +269,42 @@ async def test_pagination_and_deterministic_tie_breaker(db):
     first = await service.list_page("recruiter-1", "stream-1")
     second = await service.list_page(
         "recruiter-1", "stream-1",
-        after=ApplicationSourceCursor(first[-1].applied_at, first[-1].application_id),
+        after=ApplicationSourceCursor(
+            "stream-1", "job-1", first[-1].applied_at, first[-1].application_id,
+        ),
     )
     identifiers = [item.application_id for item in first + second]
     assert len(first) == 100 and len(second) == 1
     assert identifiers == sorted(identifiers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("cursor_stream_id", "cursor_job_id"), [
+    ("stream-2", "job-1"),
+    ("stream-1", "job-2"),
+])
+async def test_foreign_cursor_is_rejected_before_mongo_application_read(
+    db, cursor_stream_id, cursor_job_id,
+):
+    service = await provision(db, applications=[application()])
+    original = service.repository.list_applications
+    reads = 0
+
+    async def observed(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return await original(*args, **kwargs)
+
+    service.repository.list_applications = observed
+    cursor = ApplicationSourceCursor(
+        cursor_stream_id,
+        cursor_job_id,
+        NOW + timedelta(minutes=1),
+        "application-1",
+    )
+    with pytest.raises(ValueError, match="cursor does not match scope"):
+        await service.list_page("recruiter-1", "stream-1", after=cursor)
+    assert reads == 0
 
 
 @pytest.mark.asyncio

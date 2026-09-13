@@ -242,11 +242,34 @@ async def test_page_is_bounded_and_cursor_is_stable():
         for index in range(101)
     ]
     first = await service(repo).list_page("recruiter-1", "stream-1")
-    cursor = ApplicationSourceCursor(first[-1].applied_at, first[-1].application_id)
+    cursor = ApplicationSourceCursor(
+        "stream-1", "job-1", first[-1].applied_at, first[-1].application_id,
+    )
     second = await service(repo).list_page("recruiter-1", "stream-1", after=cursor)
     assert len(first) == 100 and len(second) == 1
     assert first[-1].application_id == "application-099"
     assert second[0].application_id == "application-100"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("cursor_stream_id", "cursor_job_id"), [
+    ("stream-2", "job-1"),
+    ("stream-1", "job-2"),
+    ("stream-2", "job-2"),
+])
+async def test_cursor_from_another_stream_or_job_is_rejected_before_application_read(
+    cursor_stream_id, cursor_job_id,
+):
+    repo = Repository()
+    cursor = ApplicationSourceCursor(
+        cursor_stream_id,
+        cursor_job_id,
+        repo.applications[0]["created_at"],
+        repo.applications[0]["_id"],
+    )
+    with pytest.raises(ValueError, match="cursor does not match scope"):
+        await service(repo).list_page("recruiter-1", "stream-1", after=cursor)
+    assert repo.application_reads == []
 
 
 @pytest.mark.asyncio
@@ -490,7 +513,22 @@ def test_models_are_immutable_and_limit_is_strict():
     with pytest.raises(FrozenInstanceError):
         item.status = ApplicationStatus.ACCEPTED
     with pytest.raises(ValueError):
-        ApplicationSourceCursor(NOW, " ")
+        ApplicationSourceCursor("stream-1", "job-1", NOW, " ")
+
+
+@pytest.mark.parametrize(("stream_id", "job_id"), [
+    (" ", "job-1"),
+    ("stream-1", " "),
+])
+def test_cursor_scope_identifiers_are_required_and_opaque(stream_id, job_id):
+    with pytest.raises(ValueError):
+        ApplicationSourceCursor(stream_id, job_id, NOW, "application-1")
+
+    spaced = ApplicationSourceCursor(
+        " stream-1 ", " job-1 ", NOW, " application-1 ",
+    )
+    assert spaced.stream_id == " stream-1 "
+    assert spaced.job_id == " job-1 "
 
 
 @pytest.mark.asyncio

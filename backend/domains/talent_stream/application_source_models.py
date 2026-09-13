@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from domains.shared.ids import CandidateId, JobId
+from domains.shared.ids import CandidateId, JobId, TalentStreamId
 from domains.talent_stream.stream_models import nonblank_identifier, utc_millisecond
 from models import ApplicationStatus
 
@@ -30,10 +30,14 @@ class ApplicationSource:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class ApplicationSourceCursor:
+    stream_id: TalentStreamId
+    job_id: JobId
     applied_at: datetime
     application_id: str
 
     def __post_init__(self) -> None:
+        nonblank_identifier(self.stream_id, "cursor.stream_id")
+        nonblank_identifier(self.job_id, "cursor.job_id")
         nonblank_identifier(self.application_id, "application_id")
         object.__setattr__(
             self,
