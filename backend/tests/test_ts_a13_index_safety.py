@@ -228,7 +228,7 @@ def test_manifest_matches_shipped_migration_declarations_without_importing_them(
             assert not index.sparse and not index.hidden and index.expire_after_seconds is None
             assert (collection.name, index.name) not in manifest
             manifest[collection.name, index.name] = (index.keys, options)
-    assert len(TS_INDEX_REQUIREMENTS) == 14 and len(manifest) == 32
+    assert len(TS_INDEX_REQUIREMENTS) == 14 and len(manifest) == 33
     assert manifest == shipped
     assert ("recruiter_verifications", "ts_a8_recruiter_verification_state") in manifest
     b1 = next(item for item in TS_INDEX_REQUIREMENTS if item.name == "talent_streams")
