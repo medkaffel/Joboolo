@@ -283,6 +283,7 @@ def _preference(candidate_id):
         "_id": f"candidate_preferences:{candidate_id}",
         "candidate_id": candidate_id,
         "version": 1,
+        "created_at": _utc(5),
         "updated_at": _utc(5),
         "search_state": "passive",
         "discovery": {
@@ -546,24 +547,21 @@ async def test_3_intent_pagination_over_500_events(b7_db):
 
 @pytest.mark.asyncio
 async def test_4_shared_favorite_keeps_latest_validated_representative(b7_db):
+    first = _share("cand-d", "corr-1", occurred_at=_utc(120), caller_key="k-share-1")
+    second = _share("cand-d", "corr-1", occurred_at=_utc(125), caller_key="k-share-2")
     service = await provision(
         b7_db,
-        intent_events=[
-            _share("cand-d", "corr-1", occurred_at=_utc(120), caller_key="k-share-1"),
-            _share("cand-d", "corr-2", occurred_at=_utc(125), caller_key="k-share-2"),
-        ],
-        saved_jobs=[
-            _saved_job("cand-d", "corr-1"),
-            _saved_job("cand-d", "corr-2"),
-        ],
+        intent_events=[first, second],
+        saved_jobs=[_saved_job("cand-d", "corr-1")],
     )
     result = await service.build_generation(
         STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
     )
     assert result.candidate_count == 1
     cand = result.candidates[0]
-    assert cand.shared_favorite_evidence.correlation_id == "corr-2"
+    assert cand.shared_favorite_evidence.correlation_id == "corr-1"
     assert cand.shared_favorite_evidence.occurred_at == _utc(125)
+    assert cand.shared_favorite_evidence.event_id == second.event_id
     assert cand.declared_interest_evidence is None
 
 
@@ -585,16 +583,18 @@ async def test_5_valid_withdrawal_excludes_share(b7_db):
 
 
 @pytest.mark.asyncio
-async def test_6_foreign_job_intent_document_fails_closed(b7_db):
+async def test_6_foreign_job_intent_is_outside_exact_job_scope(b7_db):
     service = await provision(
         b7_db,
-        intent_events=[_b4("cand-a", job_id="job-other", occurred_at=_utc(100))],
+        intent_events=[
+            _b4("cand-a", occurred_at=_utc(100)),
+            _b4("cand-foreign", job_id="job-other", occurred_at=_utc(101)),
+        ],
     )
-    with pytest.raises(StreamCandidateAggregationStoredDataError) as exc:
-        await service.build_generation(
-            STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
-        )
-    assert str(exc.value) == STORED_MSG
+    result = await service.build_generation(
+        STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
+    )
+    assert [str(c.candidate_id) for c in result.candidates] == ["cand-a"]
 
 
 @pytest.mark.asyncio
@@ -623,17 +623,16 @@ async def test_8_missing_opportunity_spec_fails_closed(b7_db):
 
 
 @pytest.mark.asyncio
-async def test_9_inconsistent_saved_job_fails_closed(b7_db):
+async def test_9_saved_job_owned_by_other_candidate_drops_share(b7_db):
     service = await provision(
         b7_db,
         intent_events=[_share("cand-d", "corr-1", occurred_at=_utc(120))],
         saved_jobs=[_saved_job("cand-d", "corr-1", user_id="other-user")],
     )
-    with pytest.raises(StreamCandidateAggregationStoredDataError) as exc:
-        await service.build_generation(
-            STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
-        )
-    assert str(exc.value) == STORED_MSG
+    result = await service.build_generation(
+        STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
+    )
+    assert result.candidate_count == 0
 
 
 @pytest.mark.asyncio
@@ -696,7 +695,7 @@ async def test_14_deterministic_rebuild_and_missing_stream_access(b7_db):
     result1 = await service1.build_generation(
         STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
     )
-    service2 = await provision(b7_db)
+    service2 = StreamCandidateAggregationService(b7_db)
     result2 = await service2.build_generation(
         STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
     )

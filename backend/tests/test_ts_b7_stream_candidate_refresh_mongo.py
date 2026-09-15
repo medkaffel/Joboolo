@@ -317,6 +317,7 @@ def _preference(candidate_id):
         "_id": f"candidate_preferences:{candidate_id}",
         "candidate_id": candidate_id,
         "version": 1,
+        "created_at": _utc(5),
         "updated_at": _utc(5),
         "search_state": "passive",
         "discovery": {
@@ -574,7 +575,7 @@ async def test_3_concurrent_commands_one_winner_loser_conflicts_and_is_inactive(
         service_b.refresh(_command("cmd-b", refresh_ms=500)),
         return_exceptions=True,
     )
-    successes = [r for r in results if type(r) is not Exception]
+    successes = [r for r in results if not isinstance(r, Exception)]
     errors = [r for r in results if isinstance(r, Exception)]
     assert len(successes) == 1, results
     assert len(errors) == 1
@@ -761,7 +762,7 @@ async def test_13_old_generations_are_never_deleted(b7_db):
     assert await b7_db.talent_stream_candidates.count_documents(
         {"generation_id": first.generation_id}
     ) == 1
-    assert await b7_db.talent_stream_candidates.count_documents({}) == 2
+    assert await b7_db.talent_stream_candidates.count_documents({}) == 3
 
 
 @pytest.mark.asyncio
