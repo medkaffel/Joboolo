@@ -145,7 +145,7 @@ def test_missing_performance_index_is_nonfatal():
 def test_empty_and_conforming_snapshots_remain_unchanged():
     empty = {}
     report = safety.verify_metadata(TS_INDEX_REQUIREMENTS, empty, empty)
-    assert not report.ok and len(report.diagnostics) == 16
+    assert not report.ok and len(report.diagnostics) == 17
     assert empty == {}
     collections, indexes = snapshots()
     original = deepcopy((collections, indexes))
@@ -228,7 +228,7 @@ def test_manifest_matches_shipped_migration_declarations_without_importing_them(
             assert not index.sparse and not index.hidden and index.expire_after_seconds is None
             assert (collection.name, index.name) not in manifest
             manifest[collection.name, index.name] = (index.keys, options)
-    assert len(TS_INDEX_REQUIREMENTS) == 16 and len(manifest) == 35
+    assert len(TS_INDEX_REQUIREMENTS) == 17 and len(manifest) == 35
     assert manifest == shipped
     assert ("recruiter_verifications", "ts_a8_recruiter_verification_state") in manifest
     b1 = next(item for item in TS_INDEX_REQUIREMENTS if item.name == "talent_streams")
@@ -275,11 +275,22 @@ def test_b7_projection_states_native_identity_only():
     assert requirement.indexes == ()
 
 
+def test_b7_generations_native_identity_only():
+    requirement = _b7("talent_stream_candidate_generations")
+    assert requirement.simple_collation and requirement.forbid_extra_indexes
+    assert requirement.ordinary and requirement.forbid_ttl
+    assert requirement.indexes == ()
+
+
 def test_b7_manifest_counts_and_ttl_policy():
-    b7 = (_b7("talent_stream_candidates"), _b7("talent_stream_candidate_projection_states"))
-    assert len(b7) == 2
+    b7 = (
+        _b7("talent_stream_candidates"),
+        _b7("talent_stream_candidate_projection_states"),
+        _b7("talent_stream_candidate_generations"),
+    )
+    assert len(b7) == 3
     assert all(item.ordinary and item.forbid_ttl and item.simple_collation for item in b7)
-    assert sum(1 for item in TS_INDEX_REQUIREMENTS) == 16
+    assert sum(1 for item in TS_INDEX_REQUIREMENTS) == 17
     assert sum(len(item.indexes) for item in TS_INDEX_REQUIREMENTS) == 35
 
 

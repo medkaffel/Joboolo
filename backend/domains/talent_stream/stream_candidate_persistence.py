@@ -10,6 +10,7 @@ malformed dates are always rejected.
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from hashlib import sha256
 
 from bson.int64 import Int64
@@ -35,7 +36,11 @@ TALENT_STREAM_CANDIDATE_SCHEMA_VERSION = "talent-stream-candidate-v1"
 TALENT_STREAM_CANDIDATE_PROJECTION_STATE_SCHEMA_VERSION = (
     "talent-stream-candidate-projection-state-v1"
 )
+TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION = (
+    "talent-stream-candidate-generation-v1"
+)
 TS_B7_CANDIDATE_PREFIX = "ts-b7-candidate-v1"
+TS_B7_GENERATION_RECORD_PREFIX = "ts-b7-generation-record-v1"
 
 CANDIDATE_REQUIRED = {
     "_id",
@@ -76,6 +81,35 @@ PROJECTION_STATE_FIELDS = {
     "published_at",
 }
 
+GENERATION_RECORD_FIELDS = {
+    "_id",
+    "schema_version",
+    "stream_id",
+    "generation_id",
+    "stream_version",
+    "requirement_version",
+    "role_dna_id",
+    "role_dna_version",
+    "opportunity_spec_id",
+    "opportunity_spec_version",
+    "state",
+}
+
+
+class GenerationState(Enum):
+    """Closed lifecycle for one registered B7 generation.
+
+    BUILDING records may accumulate candidate documents. SEALING is the
+    persisted transitional lock recorded atomically with the promised
+    candidate_count; it is strictly internal, refuses all staging and is only
+    resumable by an exact seal retry that reproduces the same count. SEALED is
+    permanent and immutable; a sealed generation is never reopened.
+    """
+
+    BUILDING = "building"
+    SEALING = "sealing"
+    SEALED = "sealed"
+
 _APPLICATION_FIELDS = {"application_id", "status", "applied_at"}
 _DECLARED_FIELDS = {"event_id", "occurred_at"}
 _SHARED_FIELDS = {"event_id", "correlation_id", "occurred_at"}
@@ -112,6 +146,18 @@ def candidate_document_id(stream_id: str, generation_id: str, candidate_id: str)
         _canonical_json([TS_B7_CANDIDATE_PREFIX, stream_id, generation_id, candidate_id])
     ).hexdigest()
     return f"{TS_B7_CANDIDATE_PREFIX}:sha256:{digest}"
+
+
+def generation_record_document_id(stream_id: str, generation_id: str) -> str:
+    """Deterministic B7 generation record identity; never normalizes IDs."""
+    nonblank_identifier(stream_id, "stream_id")
+    nonblank_identifier(generation_id, "generation_id")
+    digest = sha256(
+        _canonical_json(
+            [TS_B7_GENERATION_RECORD_PREFIX, stream_id, generation_id]
+        )
+    ).hexdigest()
+    return f"{TS_B7_GENERATION_RECORD_PREFIX}:sha256:{digest}"
 
 
 def _shape(value, required, optional, field):
@@ -474,3 +520,116 @@ def projection_state_from_document(document: dict) -> ProjectionState:
         published_at=_storage_datetime(document["published_at"], "published_at"),
         schema_version=document["schema_version"],
     )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class StreamCandidateGenerationRecord:
+    """Immutable B7 generation lifecycle record; holds no candidate data.
+
+    A BUILDING record carries no candidate_count; SEALING and SEALED records
+    always carry the exact sealed count. The state is the sole write authority:
+    candidate documents only ever accumulate during BUILDING, and a SEALED
+    generation is permanently immutable.
+    """
+
+    stream_id: TalentStreamId
+    generation_id: str
+    stream_version: int
+    requirement_version: int
+    role_dna_id: RoleDNAId
+    role_dna_version: int
+    opportunity_spec_id: OpportunitySpecId
+    opportunity_spec_version: int
+    state: GenerationState
+    candidate_count: int | None
+    schema_version: str = TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        nonblank_identifier(self.stream_id, "stream_id")
+        nonblank_identifier(self.generation_id, "generation_id")
+        for field in ("stream_version", "requirement_version", "role_dna_version", "opportunity_spec_version"):
+            object.__setattr__(self, field, _positive_int(getattr(self, field), field))
+        nonblank_identifier(self.role_dna_id, "role_dna_id")
+        nonblank_identifier(self.opportunity_spec_id, "opportunity_spec_id")
+        if type(self.state) is not GenerationState:
+            raise ValueError("invalid generation state")
+        if self.state is GenerationState.BUILDING:
+            if self.candidate_count is not None:
+                raise ValueError("building generations must not carry a candidate_count")
+        else:
+            if self.candidate_count is None:
+                raise ValueError("sealing generations require a candidate_count")
+            object.__setattr__(
+                self,
+                "candidate_count",
+                _nonnegative_int(self.candidate_count, "candidate_count"),
+            )
+        if (
+            type(self.schema_version) is not str
+            or self.schema_version != TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION
+        ):
+            raise ValueError("unsupported generation record schema version")
+
+
+def generation_record_to_document(record: StreamCandidateGenerationRecord) -> dict:
+    """Explicit canonical BSON document for one B7 generation lifecycle record."""
+    if type(record) is not StreamCandidateGenerationRecord:
+        raise ValueError(
+            "expected the exact B7 StreamCandidateGenerationRecord contract"
+        )
+    document = {
+        "_id": generation_record_document_id(
+            record.stream_id, record.generation_id
+        ),
+        "schema_version": record.schema_version,
+        "stream_id": record.stream_id,
+        "generation_id": record.generation_id,
+        "stream_version": int(record.stream_version),
+        "requirement_version": int(record.requirement_version),
+        "role_dna_id": record.role_dna_id,
+        "role_dna_version": int(record.role_dna_version),
+        "opportunity_spec_id": record.opportunity_spec_id,
+        "opportunity_spec_version": int(record.opportunity_spec_version),
+        "state": record.state.value,
+    }
+    if record.candidate_count is not None:
+        document["candidate_count"] = int(record.candidate_count)
+    return document
+
+
+def generation_record_from_document(document: dict) -> StreamCandidateGenerationRecord:
+    _shape(
+        document, GENERATION_RECORD_FIELDS, {"candidate_count"}, "generation record"
+    )
+    if document["schema_version"] != TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION:
+        raise ValueError("unsupported generation record schema version")
+    stream_id = nonblank_identifier(document["stream_id"], "stream_id")
+    generation_id = nonblank_identifier(document["generation_id"], "generation_id")
+    expected_id = generation_record_document_id(stream_id, generation_id)
+    if document["_id"] != expected_id:
+        raise ValueError("deterministic generation record identity mismatch")
+    state = _safe_enum(GenerationState, document["state"], "generation state")
+    kwargs = {
+        "stream_id": stream_id,
+        "generation_id": generation_id,
+        "stream_version": document["stream_version"],
+        "requirement_version": document["requirement_version"],
+        "role_dna_id": nonblank_identifier(document["role_dna_id"], "role_dna_id"),
+        "role_dna_version": document["role_dna_version"],
+        "opportunity_spec_id": nonblank_identifier(
+            document["opportunity_spec_id"], "opportunity_spec_id"
+        ),
+        "opportunity_spec_version": document["opportunity_spec_version"],
+        "state": state,
+        "candidate_count": None,
+        "schema_version": document["schema_version"],
+    }
+    if "candidate_count" in document:
+        if state is GenerationState.BUILDING:
+            raise ValueError(
+                "generation record candidate_count is forbidden while building"
+            )
+        kwargs["candidate_count"] = document["candidate_count"]
+    elif state is not GenerationState.BUILDING:
+        raise ValueError("generation record candidate_count is required once sealing")
+    return StreamCandidateGenerationRecord(**kwargs)

@@ -32,9 +32,15 @@ from domains.talent_stream.stream_candidate_models import (
     StreamCandidate,
 )
 from domains.talent_stream.stream_candidate_persistence import (
+    TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION,
     TALENT_STREAM_CANDIDATE_PROJECTION_STATE_SCHEMA_VERSION,
     TALENT_STREAM_CANDIDATE_SCHEMA_VERSION,
+    GenerationState,
+    StreamCandidateGenerationRecord,
     candidate_document_id,
+    generation_record_document_id,
+    generation_record_from_document,
+    generation_record_to_document,
     stream_candidate_from_document,
 )
 from domains.talent_stream.stream_candidate_repository import (
@@ -138,6 +144,7 @@ async def _bundle(database):
         "indexes": indexes,
         "candidates": await dump("talent_stream_candidates") if "talent_stream_candidates" in collection_names else [],
         "states": await dump("talent_stream_candidate_projection_states") if "talent_stream_candidate_projection_states" in collection_names else [],
+        "generations": await dump("talent_stream_candidate_generations") if "talent_stream_candidate_generations" in collection_names else [],
     }
 
 
@@ -193,6 +200,25 @@ def _publish(repository, *, stream_id, generation_id, expected_candidate_count,
     )
 
 
+async def _begin(repository, *, stream_id, generation_id):
+    return await repository.begin_generation(
+        stream_id=stream_id, generation_id=generation_id,
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+    )
+
+
+async def _seal(repository, *, stream_id, generation_id, candidate_count):
+    return await repository.seal_generation(
+        stream_id=stream_id, generation_id=generation_id,
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        candidate_count=candidate_count,
+    )
+
+
 async def _provision_a11_baseline(database):
     existing = set(await database.list_collection_names())
     if "talent_intent_events" not in existing:
@@ -217,6 +243,9 @@ async def test_1_migration_preflight_without_apply_is_immutable(b7_db):
     assert result["index_ready"] is False
     assert result["candidates_collection"] is False
     assert result["projection_states_collection"] is False
+    assert result["generations_collection"] is False
+    assert result["generations_ready"] is False
+    assert result["generation_records_checked"] == 0
     unchanged = await migrate(b7_db, apply=False)
     assert unchanged == result
     assert await b7_db.list_collection_names() == []
@@ -248,12 +277,16 @@ async def test_2_migration_apply_creates_collections_and_unique_index(b7_db):
     collections = await b7_db.list_collection_names()
     assert "talent_stream_candidates" in collections
     assert "talent_stream_candidate_projection_states" in collections
+    assert "talent_stream_candidate_generations" in collections
     candidate_infos = await b7_db["talent_stream_candidates"].index_information()
     assert candidate_infos["_id_"]["key"] == [("_id", 1)]
     index = candidate_infos["ts_b7_stream_generation_candidate_unique"]
     assert index["key"] == [("stream_id", 1), ("generation_id", 1), ("candidate_id", 1)]
     assert index["unique"] is True
     assert "expireAfterSeconds" not in index
+    generation_infos = await b7_db["talent_stream_candidate_generations"].index_information()
+    assert set(generation_infos) == {"_id_"}
+    assert generation_infos["_id_"]["key"] == [("_id", 1)]
     await preflight(b7_db)
 
 
@@ -326,7 +359,10 @@ async def test_8_publish_initial_generation_and_idempotent_retry(b7_db, try_idem
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     candidates = _candidate_set("stream-1", "generation-1", 2)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(candidates)
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=2)
 
     state = await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
@@ -358,6 +394,14 @@ async def test_8_publish_initial_generation_and_idempotent_retry(b7_db, try_idem
         assert document["stream_id"] == "stream-1"
         assert document["generation_id"] == "generation-1"
 
+    stored_record = await b7_db["talent_stream_candidate_generations"].find_one(
+        {"_id": generation_record_document_id("stream-1", "generation-1")}
+    )
+    record = generation_record_from_document(stored_record)
+    assert record.state is GenerationState.SEALED
+    assert record.candidate_count == 2
+    assert stored_record["schema_version"] == TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION
+
     if try_idempotent:
         again = await _publish(
             repository, stream_id="stream-1", generation_id="generation-1",
@@ -372,13 +416,19 @@ async def test_9_second_generation_cas_publication_increments_state_version(b7_d
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     first = _candidate_set("stream-1", "generation-1", 1)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(first)
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None,
     )
     second = _candidate_set("stream-1", "generation-2", 1)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-2")
     await repository.stage_candidates(second)
+    await _seal(repository, stream_id="stream-1", generation_id="generation-2",
+                candidate_count=1)
     observed = await repository.get_projection_state("stream-1")
     state = await _publish(
         repository, stream_id="stream-1", generation_id="generation-2",
@@ -396,8 +446,14 @@ async def test_10_two_initial_publications_race_one_wins_loser_conflicts(b7_db):
     await _migrate_b7_ready(b7_db)
     repository_a = StreamCandidateRepository(b7_db)
     repository_b = StreamCandidateRepository(b7_db)
+    await _begin(repository_a, stream_id="stream-1", generation_id="generation-a")
     await repository_a.stage_candidates(_candidate_set("stream-1", "generation-a", 1))
+    await _seal(repository_a, stream_id="stream-1", generation_id="generation-a",
+                candidate_count=1)
+    await _begin(repository_b, stream_id="stream-1", generation_id="generation-b")
     await repository_b.stage_candidates(_candidate_set("stream-1", "generation-b", 1))
+    await _seal(repository_b, stream_id="stream-1", generation_id="generation-b",
+                candidate_count=1)
     state_a = await _publish(
         repository_a, stream_id="stream-1", generation_id="generation-a",
         expected_candidate_count=1, observed=None,
@@ -418,9 +474,18 @@ async def test_11_optimistic_concurrency_effectively_serializes_publications(b7_
     await _migrate_b7_ready(b7_db)
     repository_a = StreamCandidateRepository(b7_db)
     repository_b = StreamCandidateRepository(b7_db)
+    await _begin(repository_a, stream_id="stream-1", generation_id="generation-1")
     await repository_a.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository_a, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
+    await _begin(repository_a, stream_id="stream-1", generation_id="generation-2")
     await repository_a.stage_candidates(_candidate_set("stream-1", "generation-2", 1))
+    await _seal(repository_a, stream_id="stream-1", generation_id="generation-2",
+                candidate_count=1)
+    await _begin(repository_b, stream_id="stream-1", generation_id="generation-3")
     await repository_b.stage_candidates(_candidate_set("stream-1", "generation-3", 1))
+    await _seal(repository_b, stream_id="stream-1", generation_id="generation-3",
+                candidate_count=1)
     await _publish(
         repository_a, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None,
@@ -445,7 +510,10 @@ async def test_11_optimistic_concurrency_effectively_serializes_publications(b7_
 async def test_12_exact_publication_retry_is_idempotent(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     first = await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None,
@@ -463,7 +531,10 @@ async def test_12_exact_publication_retry_is_idempotent(b7_db):
 async def test_publish_records_exact_provided_timestamp(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     state = await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None, published_at=_utc(901),
@@ -480,7 +551,10 @@ async def test_publish_records_exact_provided_timestamp(b7_db):
 async def test_publish_retry_with_same_timestamp_is_idempotent(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     first = await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None, published_at=_utc(901),
@@ -503,7 +577,10 @@ async def test_publish_retry_with_same_timestamp_is_idempotent(b7_db):
 async def test_publish_same_generation_different_timestamp_conflicts(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None, published_at=_utc(901),
@@ -523,6 +600,9 @@ async def test_publish_same_generation_different_timestamp_conflicts(b7_db):
 async def test_13_zero_candidate_generation_is_valid(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-empty")
+    await _seal(repository, stream_id="stream-1", generation_id="generation-empty",
+                candidate_count=0)
     state = await _publish(
         repository, stream_id="stream-1", generation_id="generation-empty",
         expected_candidate_count=0, observed=None,
@@ -538,6 +618,7 @@ async def test_14_staging_duplicate_conflicts_and_identical_retry_is_idempotent(
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     candidates = _candidate_set("stream-1", "generation-1", 2)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(candidates)
     with pytest.raises(StreamCandidateRepositoryError):
         await repository.stage_candidates(candidates + [_candidate(
@@ -559,6 +640,7 @@ async def test_15_staging_exact_retry_is_idempotent(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     same = _candidate_set("stream-1", "generation-1", 1)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(same)
     await repository.stage_candidates(same)
     read_back = await repository.find_generation("stream-1", "generation-1", limit=100)
@@ -574,7 +656,10 @@ async def test_15_staging_exact_retry_is_idempotent(b7_db):
 async def test_16_publication_rejects_candidate_count_mismatch(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     with pytest.raises(StreamCandidateConflictError):
         await _publish(
             repository, stream_id="stream-1", generation_id="generation-1",
@@ -587,12 +672,18 @@ async def test_16_publication_rejects_candidate_count_mismatch(b7_db):
 async def test_17_old_generations_remain_readable_after_swap(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None,
     )
+    await _begin(repository, stream_id="stream-1", generation_id="generation-2")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-2", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-2",
+                candidate_count=1)
     observed = await repository.get_projection_state("stream-1")
     await _publish(
         repository, stream_id="stream-1", generation_id="generation-2",
@@ -610,6 +701,7 @@ async def test_18_pagination_ascending_and_strict_limit(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     candidates = _candidate_set("stream-1", "generation-1", 5)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(candidates)
     reference = sorted(candidates, key=lambda item: item.candidate_id)
     page = await repository.find_generation("stream-1", "generation-1", limit=2)
@@ -635,7 +727,10 @@ async def test_19_publication_never_touches_other_collections(b7_db):
     await b7_db["talent_streams"].insert_one({"_id": "stream-1", "kind": "intruder"})
     await b7_db["candidate_preferences"].insert_one({"_id": "pref-1"})
     repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
     await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=None,
@@ -645,10 +740,156 @@ async def test_19_publication_never_touches_other_collections(b7_db):
     assert await b7_db["candidate_preferences"].count_documents({}) == 1
     assert bundle["states"][0]["schema_version"] == TALENT_STREAM_CANDIDATE_PROJECTION_STATE_SCHEMA_VERSION
     assert len(bundle["candidates"]) == 1
+    assert bundle["generations"][0]["schema_version"] == (
+        TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION)
+    assert bundle["generations"][0]["state"] == "sealed"
     for name in ("idempotency_key", "raw_saved_job", "raw_candidate_profile",
                  "recruiter_notes", "name", "email"):
-        for document in bundle["candidates"] + bundle["states"]:
+        for document in bundle["candidates"] + bundle["states"] + bundle["generations"]:
             assert name not in document
+
+
+async def test_begin_writes_a_building_record_without_count(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    stored = await b7_db["talent_stream_candidate_generations"].find_one(
+        {"_id": generation_record_document_id("stream-1", "generation-1")}
+    )
+    assert stored["schema_version"] == TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION
+    assert stored["state"] == "building"
+    assert "candidate_count" not in stored
+    record = generation_record_from_document(stored)
+    assert record.state is GenerationState.BUILDING and record.candidate_count is None
+
+
+@pytest.mark.asyncio
+async def test_building_generation_cannot_be_published(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await _publish(
+            repository, stream_id="stream-1", generation_id="generation-1",
+            expected_candidate_count=1, observed=None,
+        )
+    assert str(exc.value) == "b7 generation is not sealed"
+    assert await b7_db["talent_stream_candidate_projection_states"].count_documents({}) == 0
+
+
+@pytest.mark.asyncio
+async def test_sealed_generation_is_permanently_immutable(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
+    await _publish(
+        repository, stream_id="stream-1", generation_id="generation-1",
+        expected_candidate_count=1, observed=None,
+    )
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 2))
+    assert str(exc.value) == "b7 generation is sealed"
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await repository.begin_generation(
+            stream_id="stream-1", generation_id="generation-1",
+            stream_version=3, requirement_version=2,
+            role_dna_id="role-dna-1", role_dna_version=5,
+            opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        )
+    assert str(exc.value) == "b7 generation scope mismatch"
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 1
+    record = await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    assert record.state is GenerationState.SEALED and record.candidate_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sealed_exact_seal_retry_is_idempotent(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    first = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                        candidate_count=1)
+    retry = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                        candidate_count=1)
+    assert retry == first and retry.state is GenerationState.SEALED
+    assert retry.candidate_count == 1
+
+
+@pytest.mark.asyncio
+async def test_seal_after_publish_count_mismatch_conflicts(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
+    await _publish(
+        repository, stream_id="stream-1", generation_id="generation-1",
+        expected_candidate_count=1, observed=None,
+    )
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                    candidate_count=2)
+    assert str(exc.value) == "b7 sealed generation candidate count mismatch"
+
+
+@pytest.mark.asyncio
+async def test_seal_count_mismatch_with_staged_documents_conflicts(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                    candidate_count=2)
+    assert str(exc.value) == "b7 generation candidate count mismatch"
+    record = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                         candidate_count=1)
+    assert record.state is GenerationState.SEALED
+
+
+@pytest.mark.asyncio
+async def test_seal_scope_mismatch_conflicts(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await repository.seal_generation(
+            stream_id="stream-1", generation_id="generation-1",
+            stream_version=3, requirement_version=2,
+            role_dna_id="role-dna-1", role_dna_version=5,
+            opportunity_spec_id="spec-1", opportunity_spec_version=2,
+            candidate_count=1,
+        )
+    assert str(exc.value) == "b7 generation scope mismatch"
+    assert await b7_db["talent_stream_candidate_projection_states"].count_documents({}) == 0
+
+
+@pytest.mark.asyncio
+async def test_interrupted_seal_resumes_only_by_exact_retry(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await b7_db["talent_stream_candidate_generations"].update_one(
+        {"_id": generation_record_document_id("stream-1", "generation-1")},
+        {"$set": {"state": "sealing", "candidate_count": 1}},
+    )
+    pending = await repository._read_generation_record("stream-1", "generation-1")
+    assert pending.state is GenerationState.SEALING and pending.candidate_count == 1
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                    candidate_count=2)
+    assert str(exc.value) == "b7 interrupted seal retry count mismatch"
+    sealed = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                         candidate_count=1)
+    assert sealed.state is GenerationState.SEALED and sealed.candidate_count == 1
 
 
 async def _ready_without_intent_scan(database):

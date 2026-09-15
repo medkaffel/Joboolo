@@ -5,7 +5,7 @@ Run only when an explicit B7_MONGO_URL targets a standalone local Mongo
 installed. Each test uses an isolated random database test_ts_b7_<uuid> and
 drops only that database. Seeding is performed by direct document insertion
 through the exact canonical serializers; the only application write path used
-is the refresh service itself against the two B7 collections. No
+is the refresh service itself against the three B7 collections. No
 MONGO_URL/DB_NAME/admins/grants/trust are touched.
 """
 import asyncio
@@ -746,6 +746,7 @@ async def test_12_refresh_touches_only_b7_collections(b7_db):
     changed |= set(after) - set(before)
     assert changed == {
         "talent_stream_candidates", "talent_stream_candidate_projection_states",
+        "talent_stream_candidate_generations",
     }
     for name in after:
         token = name.lower()

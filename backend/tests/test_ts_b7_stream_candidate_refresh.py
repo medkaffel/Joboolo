@@ -63,7 +63,12 @@ from domains.talent_stream.stream_candidate_aggregation import (
     StreamCandidateAggregationStoredDataError,
 )
 from domains.talent_stream.stream_candidate_persistence import (
+    GenerationState,
     ProjectionState,
+    StreamCandidateGenerationRecord,
+    generation_record_document_id,
+    generation_record_from_document,
+    generation_record_to_document,
     stream_candidate_from_document,
     stream_candidate_to_document,
 )
@@ -352,6 +357,31 @@ def _generation_id(command_id: str = CMD_ID) -> str:
     )
 
 
+async def _begin_and_seal(repo, *, generation_id, candidate_count,
+                          stream_id=STREAM_ID):
+    await repo.begin_generation(
+        stream_id=stream_id,
+        generation_id=generation_id,
+        stream_version=STREAM_VERSION,
+        requirement_version=REQUIREMENT_VERSION,
+        role_dna_id=ROLE_DNA_ID,
+        role_dna_version=ROLE_DNA_VERSION,
+        opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+        opportunity_spec_version=OPPORTUNITY_VERSION,
+    )
+    await repo.seal_generation(
+        stream_id=stream_id,
+        generation_id=generation_id,
+        stream_version=STREAM_VERSION,
+        requirement_version=REQUIREMENT_VERSION,
+        role_dna_id=ROLE_DNA_ID,
+        role_dna_version=ROLE_DNA_VERSION,
+        opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+        opportunity_spec_version=OPPORTUNITY_VERSION,
+        candidate_count=candidate_count,
+    )
+
+
 class _FakeStreams:
     def __init__(self, primary, *, changed_after=None, changed_stream=None):
         self._primary = primary
@@ -518,6 +548,7 @@ class _FakeCandidateRepository:
         self.ready = ready
         self.state = state
         self.documents = dict(documents)
+        self.generations = {}
         self.fail_stage_batch = fail_stage_batch
         self.barrier_reads = barrier_reads
         self.flip_streams = flip_streams
@@ -563,6 +594,119 @@ class _FakeCandidateRepository:
             and state.published_at == published_at
         )
 
+    def _generation_scope_matches(self, record, *, stream_id, generation_id,
+                                  stream_version, requirement_version,
+                                  role_dna_id, role_dna_version,
+                                  opportunity_spec_id, opportunity_spec_version):
+        return (
+            str(record.stream_id) == str(stream_id)
+            and str(record.generation_id) == str(generation_id)
+            and int(record.stream_version) == int(stream_version)
+            and int(record.requirement_version) == int(requirement_version)
+            and str(record.role_dna_id) == str(role_dna_id)
+            and int(record.role_dna_version) == int(role_dna_version)
+            and str(record.opportunity_spec_id) == str(opportunity_spec_id)
+            and int(record.opportunity_spec_version) == int(opportunity_spec_version)
+        )
+
+    def _generation(self, stream_id, generation_id):
+        document = self.generations.get(
+            generation_record_document_id(stream_id, generation_id)
+        )
+        if document is None:
+            return None
+        return generation_record_from_document(document)
+
+    async def begin_generation(
+        self, stream_id, *, generation_id, stream_version,
+        requirement_version, role_dna_id, role_dna_version,
+        opportunity_spec_id, opportunity_spec_version,
+    ):
+        if not self.ready:
+            raise StreamCandidateReadinessError(
+                "b7 candidate projection storage is not ready"
+            )
+        document = generation_record_to_document(StreamCandidateGenerationRecord(
+            stream_id=stream_id,
+            generation_id=generation_id,
+            stream_version=stream_version,
+            requirement_version=requirement_version,
+            role_dna_id=role_dna_id,
+            role_dna_version=role_dna_version,
+            opportunity_spec_id=opportunity_spec_id,
+            opportunity_spec_version=opportunity_spec_version,
+            state=GenerationState.BUILDING,
+            candidate_count=None,
+        ))
+        record_id = generation_record_document_id(stream_id, generation_id)
+        if record_id in self.generations:
+            existing = generation_record_from_document(self.generations[record_id])
+            if self._generation_scope_matches(
+                existing, stream_id=stream_id, generation_id=generation_id,
+                stream_version=stream_version, requirement_version=requirement_version,
+                role_dna_id=role_dna_id, role_dna_version=role_dna_version,
+                opportunity_spec_id=opportunity_spec_id,
+                opportunity_spec_version=opportunity_spec_version,
+            ):
+                return existing
+            raise StreamCandidateConflictError("b7 generation scope mismatch")
+        self.generations[record_id] = document
+        return generation_record_from_document(document)
+
+    async def seal_generation(
+        self, stream_id, *, generation_id, stream_version,
+        requirement_version, role_dna_id, role_dna_version,
+        opportunity_spec_id, opportunity_spec_version,
+        candidate_count,
+    ):
+        if not self.ready:
+            raise StreamCandidateReadinessError(
+                "b7 candidate projection storage is not ready"
+            )
+        record = self._generation(stream_id, generation_id)
+        if record is None:
+            raise StreamCandidateConflictError("b7 generation is not registered")
+        if not self._generation_scope_matches(
+            record, stream_id=stream_id, generation_id=generation_id,
+            stream_version=stream_version, requirement_version=requirement_version,
+            role_dna_id=role_dna_id, role_dna_version=role_dna_version,
+            opportunity_spec_id=opportunity_spec_id,
+            opportunity_spec_version=opportunity_spec_version,
+        ):
+            raise StreamCandidateConflictError("b7 generation scope mismatch")
+        if record.state is GenerationState.SEALED:
+            if record.candidate_count != candidate_count:
+                raise StreamCandidateConflictError(
+                    "b7 sealed generation candidate count mismatch"
+                )
+            return record
+        staged = [
+            document
+            for document in self.documents.values()
+            if document.get("stream_id") == stream_id
+            and document.get("generation_id") == generation_id
+        ]
+        if len(staged) != candidate_count:
+            raise StreamCandidateConflictError("b7 generation candidate count mismatch")
+        sealed_document = generation_record_to_document(
+            StreamCandidateGenerationRecord(
+                stream_id=record.stream_id,
+                generation_id=record.generation_id,
+                stream_version=record.stream_version,
+                requirement_version=record.requirement_version,
+                role_dna_id=record.role_dna_id,
+                role_dna_version=record.role_dna_version,
+                opportunity_spec_id=record.opportunity_spec_id,
+                opportunity_spec_version=record.opportunity_spec_version,
+                state=GenerationState.SEALED,
+                candidate_count=candidate_count,
+            )
+        )
+        self.generations[generation_record_document_id(stream_id, generation_id)] = (
+            sealed_document
+        )
+        return generation_record_from_document(sealed_document)
+
     async def stage_candidates(self, candidates):
         if not self.ready:
             raise StreamCandidateReadinessError(
@@ -605,9 +749,24 @@ class _FakeCandidateRepository:
         self.stage_calls += 1
         if self.fail_stage_batch and self.stage_calls == self.fail_stage_batch:
             raise StreamCandidateRepositoryError("b7 staging write failed")
-        active_generation = (
-            None if self.state is None else self.state.active_generation_id
-        )
+        record = self._generation(first.stream_id, first.generation_id)
+        if record is None:
+            raise StreamCandidateConflictError("b7 generation is not registered")
+        if not self._generation_scope_matches(
+            record,
+            stream_id=first.stream_id,
+            generation_id=first.generation_id,
+            stream_version=first.stream_version,
+            requirement_version=first.requirement_version,
+            role_dna_id=first.role_dna_id,
+            role_dna_version=first.role_dna_version,
+            opportunity_spec_id=first.opportunity_spec_id,
+            opportunity_spec_version=first.opportunity_spec_version,
+        ):
+            raise StreamCandidateConflictError("b7 generation scope mismatch")
+        if record.state is GenerationState.SEALING:
+            raise StreamCandidateConflictError("b7 generation is sealing")
+        sealed = record.state is GenerationState.SEALED
         for candidate, document in zip(candidates, documents):
             stored = self.documents.get(document["_id"])
             if stored is not None:
@@ -616,10 +775,8 @@ class _FakeCandidateRepository:
                         "b7 staging conflicts with an existing candidate document"
                     )
                 continue
-            if active_generation == candidate.generation_id:
-                raise StreamCandidateConflictError(
-                    "b7 cannot mutate an active generation"
-                )
+            if sealed:
+                raise StreamCandidateConflictError("b7 generation is sealed")
             self.documents[document["_id"]] = document
         if self.flip_streams is not None:
             self.flip_streams.force_changed()
@@ -654,6 +811,27 @@ class _FakeCandidateRepository:
             published_at = utc_millisecond(published_at, "published_at")
         if expected_state is not None and expected_state.stream_id != stream_id:
             raise StreamCandidateConflictError("b7 expected projection state mismatch")
+        record = self._generation(stream_id, generation_id)
+        if record is None:
+            raise StreamCandidateConflictError("b7 generation is not registered")
+        if not self._generation_scope_matches(
+            record,
+            stream_id=stream_id,
+            generation_id=generation_id,
+            stream_version=stream_version,
+            requirement_version=requirement_version,
+            role_dna_id=role_dna_id,
+            role_dna_version=role_dna_version,
+            opportunity_spec_id=opportunity_spec_id,
+            opportunity_spec_version=opportunity_spec_version,
+        ):
+            raise StreamCandidateConflictError("b7 generation scope mismatch")
+        if record.state is not GenerationState.SEALED:
+            raise StreamCandidateConflictError("b7 generation is not sealed")
+        if record.candidate_count != expected_candidate_count:
+            raise StreamCandidateConflictError(
+                "b7 sealed generation candidate count mismatch"
+            )
         staged = [
             document
             for document in self.documents.values()
@@ -1011,6 +1189,7 @@ class TestCasExpectedStateGone:
             published_at=_utc(800),
         )
         repo = _FakeCandidateRepository(state=None)
+        _run(_begin_and_seal(repo, generation_id="previous-gen", candidate_count=0))
         with pytest.raises(StreamCandidateConflictError) as exc:
             _run(repo.publish_generation(
                 STREAM_ID,
@@ -1043,6 +1222,7 @@ class TestCasExpectedStateGone:
             published_at=_utc(700),
         )
         repo = _FakeCandidateRepository(state=current)
+        _run(_begin_and_seal(repo, generation_id="other-gen", candidate_count=0))
         with pytest.raises(StreamCandidateConflictError) as exc:
             _run(repo.publish_generation(
                 STREAM_ID,
@@ -1078,6 +1258,7 @@ class TestCasExpectedStateGone:
                 published_at=_utc(700),
             )
         )
+        _run(_begin_and_seal(repo, generation_id="published-gen", candidate_count=0))
         with pytest.raises(StreamCandidateConflictError) as exc:
             _run(repo.publish_generation(
                 STREAM_ID,

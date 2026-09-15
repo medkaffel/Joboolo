@@ -1,13 +1,14 @@
 """Shipped A1-B7 metadata contracts, owned by Talent Stream.
 
-16 authoritative collections, 35 secondary indexes. Unique identities/version
+17 authoritative collections, 35 secondary indexes. Unique identities/version
 constraints are correctness-critical; lookup indexes are performance-only.
 All index provisioning remains explicit-migration-only. No derived collections,
 legacy startup indexes, or A14 storage is included. A5/A6/A12 add none.
 Absent explicit collation inherits the collection default, exactly as the
-existing migrations do; A11, the B7 candidates collection, the B7 projection states
-collection and the B7 Intent job event scan require simple collation throughout.
-Expiry lookup indexes are not TTL or authorization rules.
+existing migrations do; A11, the B7 candidates collection, the B7 projection
+states collection, the B7 generation registry and the B7 Intent job event scan
+require simple collation throughout. Expiry lookup indexes are not TTL or
+authorization rules.
 """
 from mongo_index_safety import CollectionRequirement, IndexRequirement
 
@@ -66,6 +67,14 @@ TALENT_STREAM_CANDIDATES_REQUIREMENT = CollectionRequirement(
 
 TALENT_STREAM_CANDIDATE_PROJECTION_STATES_REQUIREMENT = CollectionRequirement(
     "talent_stream_candidate_projection_states",
+    (),
+    simple_collation=True,
+    forbid_extra_indexes=True,
+)
+
+
+TALENT_STREAM_CANDIDATE_GENERATIONS_REQUIREMENT = CollectionRequirement(
+    "talent_stream_candidate_generations",
     (),
     simple_collation=True,
     forbid_extra_indexes=True,
@@ -173,4 +182,5 @@ TS_INDEX_REQUIREMENTS = (
     # migrate_ts_b7_stream_candidate_projection.py
     TALENT_STREAM_CANDIDATES_REQUIREMENT,
     TALENT_STREAM_CANDIDATE_PROJECTION_STATES_REQUIREMENT,
+    TALENT_STREAM_CANDIDATE_GENERATIONS_REQUIREMENT,
 )
