@@ -9,6 +9,7 @@ two new STEP 3 modules are all enforced without a database.
 """
 import asyncio
 import ast
+import dataclasses
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from domains.talent_stream.application_source_service import (
     ApplicationSourceConflictError,
     ApplicationSourceStoredDataError,
     MAX_APPLICATION_SOURCE_PAGE_SIZE,
+    _SecuredScope,
 )
 from domains.talent_stream.contracts import (
     DiscoveryState,
@@ -61,6 +63,7 @@ from domains.talent_stream.stream_candidate_aggregation import (
     StreamCandidateAggregationReadinessError,
     StreamCandidateAggregationService,
     StreamCandidateAggregationStoredDataError,
+    StreamCandidateGenerationScopeGuard,
 )
 from domains.talent_stream.stream_candidate_intent_source import B4_EVENT_TYPE
 from domains.talent_stream.stream_candidate_models import (
@@ -199,6 +202,24 @@ def _opportunity_source() -> OpportunitySpecificationSource:
         source_ref=SOURCE_REF,
         version_provenance_ref=SOURCE_REF,
     )
+
+
+def _make_scope_guard(**overrides) -> StreamCandidateGenerationScopeGuard:
+    values = dict(
+        recruiting_actor_context=RecruitingActorContext(
+            recruiter_user_id=RECRUITER_ID,
+            requesting_organization_id="org-r-1",
+            hiring_company_id="org-h-1",
+            mandate_id=None,
+        ),
+        opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+        opportunity_spec_version=OPPORTUNITY_VERSION,
+        source_job_id=JOB_ID,
+        source_ref=SOURCE_REF,
+        version_provenance_ref=SOURCE_REF,
+    )
+    values.update(overrides)
+    return StreamCandidateGenerationScopeGuard(**values)
 
 
 def _application(app_id: str, candidate_id: str, *, ms: int = 30,
@@ -395,6 +416,22 @@ class _FakeApplications:
         self.raise_stored = False
         self.raise_conflict = False
         self.raise_conflict_on = None
+        self.secured_job_id = JOB_ID
+
+    async def _scope(self, recruiter_id, stream_id):
+        if self.raise_conflict:
+            raise ApplicationSourceConflictError("application source changed")
+        if self.raise_readiness:
+            raise ApplicationSourceReadinessError("application source not ready")
+        if self.raise_access:
+            raise ApplicationSourceAccessError("application source not authorized")
+        if self.raise_stored:
+            raise ApplicationSourceStoredDataError("invalid stored application source")
+        return _SecuredScope(
+            stream_id=str(stream_id),
+            job_id=self.secured_job_id,
+            fingerprint=(),
+        )
 
     async def list_page(self, recruiter_id, stream_id, *, after=None, limit=100):
         self.calls.append((recruiter_id, stream_id, after, limit))
@@ -579,6 +616,7 @@ class TestBuiltGenerationIdentity:
                 opportunity_spec_version=OPPORTUNITY_VERSION,
                 candidates=(other, cand),
                 computed_at=_utc(500),
+                scope_guard=_make_scope_guard(),
             )
         with pytest.raises(ValueError, match="ordered and unique"):
             BuiltStreamCandidateGeneration(
@@ -589,6 +627,7 @@ class TestBuiltGenerationIdentity:
                 opportunity_spec_version=OPPORTUNITY_VERSION,
                 candidates=(cand, cand),
                 computed_at=_utc(500),
+                scope_guard=_make_scope_guard(),
             )
         with pytest.raises(ValueError, match="scope mismatch"):
             BuiltStreamCandidateGeneration(
@@ -614,6 +653,7 @@ class TestBuiltGenerationIdentity:
                     ),
                 ),
                 computed_at=_utc(500),
+                scope_guard=_make_scope_guard(),
             )
 
     def test_errors_are_redacted_fixed_messages(self):
@@ -1228,3 +1268,92 @@ class TestReadOnlySurface:
         assert "StreamCandidateSourceRepository" in public
         write_names = [name for name in public if name.startswith(("insert", "update", "delete"))]
         assert write_names == []
+
+
+class TestGenerationScopeCurrent:
+    """STEP 4 revalidation must fail on structural divergences that leave the
+    stream/requirement/opportunity versions unchanged."""
+
+    def _built(self, service):
+        return _run(service.build_generation(
+            STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
+        ))
+
+    def test_unchanged_scope_is_accepted(self):
+        service = _build_service()
+        built = self._built(service)
+        _run(service.assert_generation_scope_current(built))
+        assert built.scope_guard is not None
+        assert built.scope_guard.recruiting_actor_context == \
+            _make_stream().recruiting_actor_context
+
+    def test_actor_mutation_same_version_is_conflict(self):
+        stream = _make_stream()
+        service = _build_service(streams=_FakeStreams(stream))
+        built = self._built(service)
+        changed = dataclasses.replace(
+            stream,
+            recruiting_actor_context=RecruitingActorContext(
+                recruiter_user_id=RECRUITER_ID,
+                requesting_organization_id="org-r-other",
+                hiring_company_id="org-h-1",
+                mandate_id=None,
+            ),
+        )
+        service.streams = _FakeStreams(changed)
+        with pytest.raises(StreamCandidateAggregationConflictError) as exc:
+            _run(service.assert_generation_scope_current(built))
+        assert str(exc.value) == CONFLICT_MSG
+
+    def test_source_job_mutation_same_versions_is_conflict(self):
+        service = _build_service()
+        built = self._built(service)
+        changed = OpportunitySpecificationSource(
+            opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+            version=OPPORTUNITY_VERSION,
+            source_job_id="job-other",
+            source_ref=SOURCE_REF,
+            version_provenance_ref=SOURCE_REF,
+        )
+        service.sources = _FakeSources(changed)
+        with pytest.raises(StreamCandidateAggregationConflictError) as exc:
+            _run(service.assert_generation_scope_current(built))
+        assert str(exc.value) == CONFLICT_MSG
+
+    def test_source_ref_mutation_is_conflict(self):
+        service = _build_service()
+        built = self._built(service)
+        changed = OpportunitySpecificationSource(
+            opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+            version=OPPORTUNITY_VERSION,
+            source_job_id=JOB_ID,
+            source_ref="source-ref-other",
+            version_provenance_ref=SOURCE_REF,
+        )
+        service.sources = _FakeSources(changed)
+        with pytest.raises(StreamCandidateAggregationConflictError) as exc:
+            _run(service.assert_generation_scope_current(built))
+        assert str(exc.value) == CONFLICT_MSG
+
+    def test_version_provenance_ref_mutation_is_conflict(self):
+        service = _build_service()
+        built = self._built(service)
+        changed = OpportunitySpecificationSource(
+            opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+            version=OPPORTUNITY_VERSION,
+            source_job_id=JOB_ID,
+            source_ref=SOURCE_REF,
+            version_provenance_ref="source-ref-other",
+        )
+        service.sources = _FakeSources(changed)
+        with pytest.raises(StreamCandidateAggregationConflictError) as exc:
+            _run(service.assert_generation_scope_current(built))
+        assert str(exc.value) == CONFLICT_MSG
+
+    def test_secured_job_drift_is_conflict(self):
+        service = _build_service()
+        built = self._built(service)
+        service.applications.secured_job_id = "job-other"
+        with pytest.raises(StreamCandidateAggregationConflictError) as exc:
+            _run(service.assert_generation_scope_current(built))
+        assert str(exc.value) == CONFLICT_MSG

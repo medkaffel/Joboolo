@@ -181,13 +181,15 @@ else:
         pytest.skip("G1 NOT RUN LOCALLY — no explicit B7_MONGO_URL")
 
 
-def _publish(repository, *, stream_id, generation_id, expected_candidate_count, observed=None):
+def _publish(repository, *, stream_id, generation_id, expected_candidate_count,
+             observed=None, published_at=_utc(900)):
     return repository.publish_generation(
         stream_id=stream_id, stream_version=3, requirement_version=2,
         generation_id=generation_id, expected_candidate_count=expected_candidate_count,
         role_dna_id="role-dna-1", role_dna_version=4,
         opportunity_spec_id="spec-1", opportunity_spec_version=2,
         expected_state=observed,
+        published_at=published_at,
     )
 
 
@@ -417,6 +419,65 @@ async def test_12_exact_publication_retry_is_idempotent(b7_db):
     )
     assert retry == current == first
     assert (await repository.get_projection_state("stream-1")).state_version == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_records_exact_provided_timestamp(b7_db):
+    await migrate(b7_db, apply=True)
+    repository = StreamCandidateRepository(b7_db)
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    state = await _publish(
+        repository, stream_id="stream-1", generation_id="generation-1",
+        expected_candidate_count=1, observed=None, published_at=_utc(901),
+    )
+    assert state.published_at == _utc(901)
+    stored = await b7_db["talent_stream_candidate_projection_states"].find_one(
+        {"_id": "stream-1"}
+    )
+    assert stored["published_at"] == _utc(901).replace(tzinfo=None)
+    assert await b7_db["talent_stream_candidate_projection_states"].count_documents({}) == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_retry_with_same_timestamp_is_idempotent(b7_db):
+    await migrate(b7_db, apply=True)
+    repository = StreamCandidateRepository(b7_db)
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    first = await _publish(
+        repository, stream_id="stream-1", generation_id="generation-1",
+        expected_candidate_count=1, observed=None, published_at=_utc(901),
+    )
+    current = await repository.get_projection_state("stream-1")
+    retry = await _publish(
+        repository, stream_id="stream-1", generation_id="generation-1",
+        expected_candidate_count=1, observed=current, published_at=_utc(901),
+    )
+    assert retry == current == first
+    assert (await repository.get_projection_state("stream-1")).state_version == 1
+    assert await repository.get_projection_state("stream-1") == _publish(
+        repository, stream_id="stream-1", generation_id="generation-1",
+        expected_candidate_count=1, observed=current, published_at=_utc(901),
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_same_generation_different_timestamp_conflicts(b7_db):
+    await migrate(b7_db, apply=True)
+    repository = StreamCandidateRepository(b7_db)
+    await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
+    await _publish(
+        repository, stream_id="stream-1", generation_id="generation-1",
+        expected_candidate_count=1, observed=None, published_at=_utc(901),
+    )
+    current = await repository.get_projection_state("stream-1")
+    with pytest.raises(StreamCandidateConflictError):
+        await _publish(
+            repository, stream_id="stream-1", generation_id="generation-1",
+            expected_candidate_count=1, observed=current, published_at=_utc(902),
+        )
+    state = await repository.get_projection_state("stream-1")
+    assert state.published_at == _utc(901)
+    assert state.state_version == 1
 
 
 @pytest.mark.asyncio

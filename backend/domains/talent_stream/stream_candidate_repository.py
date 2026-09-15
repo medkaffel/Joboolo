@@ -5,8 +5,6 @@ reads, no runtime index creation, no auto repair, and a fixed redacted repositor
 error. A published generation is immutable unless a retry reproduces an already
 identical document.
 """
-from datetime import datetime, timezone
-
 from pymongo import ReadPreference
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from pymongo.write_concern import WriteConcern
@@ -314,9 +312,13 @@ class StreamCandidateRepository:
         opportunity_spec_version,
         expected_candidate_count,
         expected_state,
-        published_at=None,
+        published_at,
     ):
-        """Atomically publish one complete generation; exactly one writer wins."""
+        """Atomically publish one complete generation; exactly one writer wins.
+
+        The caller MUST provide an explicit UTC/millisecond-precision
+        publication timestamp; the repository never reads a clock.
+        """
         await self.readiness()
         nonblank_identifier(stream_id, "stream_id")
         nonblank_identifier(generation_id, "generation_id")
@@ -328,15 +330,12 @@ class StreamCandidateRepository:
         positive_entity_version(opportunity_spec_version, "opportunity_spec_version")
         if expected_state is not None and expected_state.stream_id != stream_id:
             raise StreamCandidateConflictError(_PROJECTION_STATE_MISMATCH_MSG)
-        if published_at is None:
-            published_at = datetime.now(timezone.utc)
-        else:
-            try:
-                published_at = utc_millisecond(published_at, "published_at")
-            except ValueError:
-                raise ValueError(
-                    "invalid stream candidate publication timestamp"
-                ) from None
+        try:
+            published_at = utc_millisecond(published_at, "published_at")
+        except ValueError:
+            raise ValueError(
+                "invalid stream candidate publication timestamp"
+            ) from None
 
         documents = await self._read_generation_documents(stream_id, generation_id)
         candidates = []

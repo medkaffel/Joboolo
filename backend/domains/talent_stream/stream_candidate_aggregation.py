@@ -24,6 +24,7 @@ from domains.talent_stream.application_source_service import (
     ApplicationSourceStoredDataError,
     MAX_APPLICATION_SOURCE_PAGE_SIZE,
 )
+from domains.talent_stream.contracts import RecruitingActorContext
 from domains.talent_stream.discovery_pool_repository import (
     DiscoveryPoolReadinessError,
     DiscoveryPoolRepositoryError,
@@ -106,6 +107,41 @@ _INTENT_EVENT_TYPES = (
 
 
 @dataclass(frozen=True, slots=True, repr=False)
+class StreamCandidateGenerationScopeGuard:
+    """Immutable B7-internal snapshot of the exact structural scope used for a
+    build. Never persisted in talent_stream_candidates, never exposed through
+    StreamCandidateRefreshResult, never carries candidate data. Revalidation
+    after build or between staging and publication compares the live Stream
+    and the exact Opportunity Specification against this snapshot so that a
+    publication can never escape a structural divergence that does not change
+    stream/requirement/opportunity versions.
+    """
+
+    recruiting_actor_context: RecruitingActorContext
+    opportunity_spec_id: str
+    opportunity_spec_version: EntityVersion
+    source_job_id: str
+    source_ref: str | None
+    version_provenance_ref: str
+
+    def __post_init__(self) -> None:
+        if type(self.recruiting_actor_context) is not RecruitingActorContext:
+            raise ValueError("invalid recruiting actor context in scope guard")
+        nonblank_identifier(self.opportunity_spec_id, "opportunity_spec_id")
+        object.__setattr__(
+            self,
+            "opportunity_spec_version",
+            positive_entity_version(
+                self.opportunity_spec_version, "opportunity_spec_version"
+            ),
+        )
+        nonblank_identifier(self.source_job_id, "source_job_id")
+        if self.source_ref is not None:
+            nonblank_identifier(self.source_ref, "source_ref")
+        nonblank_identifier(self.version_provenance_ref, "version_provenance_ref")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class BuiltStreamCandidateGeneration:
     """Immutable B7 STEP 3 aggregation result; deterministic by contract."""
 
@@ -119,6 +155,7 @@ class BuiltStreamCandidateGeneration:
     opportunity_spec_version: EntityVersion
     candidates: tuple[StreamCandidate, ...]
     computed_at: datetime
+    scope_guard: StreamCandidateGenerationScopeGuard
 
     @property
     def candidate_count(self) -> int:
@@ -154,6 +191,14 @@ class BuiltStreamCandidateGeneration:
             "computed_at",
             utc_millisecond(self.computed_at, "computed_at"),
         )
+        if type(self.scope_guard) is not StreamCandidateGenerationScopeGuard:
+            raise ValueError("invalid scope guard in generation")
+        if (
+            str(self.scope_guard.opportunity_spec_id) != str(self.opportunity_spec_id)
+            or int(self.scope_guard.opportunity_spec_version)
+            != int(self.opportunity_spec_version)
+        ):
+            raise ValueError("scope guard opportunity identity mismatch")
         if type(self.candidates) is not tuple:
             raise ValueError("candidates must be an immutable tuple")
         scope = (
@@ -647,11 +692,7 @@ class StreamCandidateAggregationService:
             raise StreamCandidateAggregationStoredDataError(
                 _AGGREGATION_STORED_MSG
             ) from None
-        if (
-            current_opportunity.opportunity_spec_id != opportunity.opportunity_spec_id
-            or current_opportunity.version != opportunity.version
-            or current_opportunity.source_job_id != opportunity.source_job_id
-        ):
+        if current_opportunity != opportunity:
             raise StreamCandidateAggregationConflictError(_AGGREGATION_CONFLICT_MSG)
 
         try:
@@ -711,6 +752,14 @@ class StreamCandidateAggregationService:
             or opportunity.version != scope["opportunity_spec_version"]
         ):
             raise StreamCandidateAggregationStoredDataError(_AGGREGATION_STORED_MSG)
+        scope_guard = StreamCandidateGenerationScopeGuard(
+            recruiting_actor_context=stream.recruiting_actor_context,
+            opportunity_spec_id=opportunity.opportunity_spec_id,
+            opportunity_spec_version=opportunity.version,
+            source_job_id=opportunity.source_job_id,
+            source_ref=opportunity.source_ref,
+            version_provenance_ref=opportunity.version_provenance_ref,
+        )
 
         try:
             applications = await self._read_applications(scope, opportunity.source_job_id)
@@ -734,6 +783,7 @@ class StreamCandidateAggregationService:
                 opportunity_spec_version=scope["opportunity_spec_version"],
                 candidates=candidates,
                 computed_at=computed_at,
+                scope_guard=scope_guard,
             )
             await self._revalidate_scope(scope, fingerprint, opportunity)
         except (
@@ -751,8 +801,9 @@ class StreamCandidateAggregationService:
 
     async def assert_generation_scope_current(self, generation):
         """Read-only revalidation that a built generation still matches the
-        active B1 scope. Never rebuilds, never re-scans candidates, and never
-        reads application rows beyond the B3 ownership validation. Raises the
+        active B1 scope and the exact Opportunity Specification it was built
+        from. Never rebuilds, never re-scans candidates, and never reads
+        application rows beyond the B3 ownership validation. Raises the
         aggregation fail-closed errors (Readiness/Stored/Conflict) on any
         divergence so the refresh orchestrator can map them."""
         if type(generation) is not BuiltStreamCandidateGeneration:
@@ -781,8 +832,36 @@ class StreamCandidateAggregationService:
             != int(generation.opportunity_spec_version)
         ):
             raise StreamCandidateAggregationConflictError(_AGGREGATION_CONFLICT_MSG)
+        if (
+            reloaded.recruiting_actor_context
+            != generation.scope_guard.recruiting_actor_context
+        ):
+            raise StreamCandidateAggregationConflictError(_AGGREGATION_CONFLICT_MSG)
+        guard = generation.scope_guard
         try:
-            await self.applications._scope(snapshot["recruiter_id"], stream_id)
+            current_opportunity = await self.sources.get_opportunity(
+                str(generation.opportunity_spec_id),
+                int(generation.opportunity_spec_version),
+            )
+        except StreamCandidateSourceStoredDataError:
+            raise StreamCandidateAggregationStoredDataError(
+                _AGGREGATION_STORED_MSG
+            ) from None
+        except StreamCandidateSourceRepositoryError:
+            raise StreamCandidateAggregationStoredDataError(
+                _AGGREGATION_STORED_MSG
+            ) from None
+        if (
+            current_opportunity is None
+            or str(current_opportunity.opportunity_spec_id) != str(guard.opportunity_spec_id)
+            or int(current_opportunity.version) != int(guard.opportunity_spec_version)
+            or current_opportunity.source_job_id != guard.source_job_id
+            or current_opportunity.source_ref != guard.source_ref
+            or current_opportunity.version_provenance_ref != guard.version_provenance_ref
+        ):
+            raise StreamCandidateAggregationConflictError(_AGGREGATION_CONFLICT_MSG)
+        try:
+            secured = await self.applications._scope(snapshot["recruiter_id"], stream_id)
         except ApplicationSourceAccessError:
             raise StreamCandidateAggregationConflictError(
                 _AGGREGATION_CONFLICT_MSG
@@ -800,3 +879,5 @@ class StreamCandidateAggregationService:
             raise StreamCandidateAggregationStoredDataError(
                 _AGGREGATION_STORED_MSG
             ) from None
+        if secured is None or str(secured.job_id) != str(guard.source_job_id):
+            raise StreamCandidateAggregationConflictError(_AGGREGATION_CONFLICT_MSG)

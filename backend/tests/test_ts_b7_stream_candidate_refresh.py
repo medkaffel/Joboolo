@@ -32,6 +32,7 @@ from domains.talent_stream.application_source_service import (
     ApplicationSourceConflictError,
     ApplicationSourceStoredDataError,
     MAX_APPLICATION_SOURCE_PAGE_SIZE,
+    _SecuredScope,
 )
 from domains.talent_stream.contracts import (
     DiscoveryState,
@@ -456,7 +457,11 @@ class _FakeApplications:
             raise ApplicationSourceAccessError("application source not authorized")
         if not self.authorized:
             raise ApplicationSourceAccessError("application source not authorized")
-        return None
+        return _SecuredScope(
+            stream_id=str(stream_id),
+            job_id=JOB_ID,
+            fingerprint=(),
+        )
 
     def fail_scope_on_call(self, call_number):
         self._scope_fail_on = call_number
@@ -1156,6 +1161,66 @@ class TestScopeRevalidation:
         repo = _FakeCandidateRepository(flip_streams=streams)
         apps = _FakeApplications([_application("app-1", "cand-1")])
         service, _, repository = _build_refresh(streams=streams, apps=apps, repo=repo)
+        with pytest.raises(StreamCandidateRefreshConflictError) as exc:
+            _run(service.refresh(_command()))
+        assert str(exc.value) == SCOPE_CHANGED_MSG
+        assert _run(repo.get_projection_state(STREAM_ID)) is None
+        assert len(repo.documents) == 1
+
+    def test_actor_mutation_after_build_blocks_stage_and_publish(self):
+        changed = dataclasses.replace(
+            _make_stream(),
+            recruiting_actor_context=RecruitingActorContext(
+                recruiter_user_id=RECRUITER_ID,
+                requesting_organization_id="org-r-other",
+                hiring_company_id="org-h-1",
+                mandate_id=None,
+            ),
+        )
+        streams = _FakeStreams(_make_stream(), changed_after=3, changed_stream=changed)
+        apps = _FakeApplications([_application("app-1", "cand-1")])
+        service, _, repo = _build_refresh(streams=streams, apps=apps)
+        with pytest.raises(StreamCandidateRefreshConflictError) as exc:
+            _run(service.refresh(_command()))
+        assert str(exc.value) == SCOPE_CHANGED_MSG
+        assert _run(repo.get_projection_state(STREAM_ID)) is None
+        assert len(repo.documents) == 0
+
+    def test_source_job_mutation_after_build_blocks_stage_and_publish(self):
+        sources = _FakeSources(_opportunity_source())
+        changed = OpportunitySpecificationSource(
+            opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+            version=OPPORTUNITY_VERSION,
+            source_job_id="job-other",
+            source_ref=SOURCE_REF,
+            version_provenance_ref=SOURCE_REF,
+        )
+        sources.opportunity_sequence = [
+            _opportunity_source(), _opportunity_source(), changed,
+        ]
+        apps = _FakeApplications([_application("app-1", "cand-1")])
+        service, _, repo = _build_refresh(sources=sources, apps=apps)
+        with pytest.raises(StreamCandidateRefreshConflictError) as exc:
+            _run(service.refresh(_command()))
+        assert str(exc.value) == SCOPE_CHANGED_MSG
+        assert _run(repo.get_projection_state(STREAM_ID)) is None
+        assert len(repo.documents) == 0
+
+    def test_provenance_mutation_after_staging_blocks_publish(self):
+        sources = _FakeSources(_opportunity_source())
+        changed = OpportunitySpecificationSource(
+            opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+            version=OPPORTUNITY_VERSION,
+            source_job_id=JOB_ID,
+            source_ref="source-ref-other",
+            version_provenance_ref="source-ref-other",
+        )
+        sources.opportunity_sequence = [
+            _opportunity_source(), _opportunity_source(),
+            _opportunity_source(), changed,
+        ]
+        apps = _FakeApplications([_application("app-1", "cand-1")])
+        service, _, repo = _build_refresh(sources=sources, apps=apps)
         with pytest.raises(StreamCandidateRefreshConflictError) as exc:
             _run(service.refresh(_command()))
         assert str(exc.value) == SCOPE_CHANGED_MSG
