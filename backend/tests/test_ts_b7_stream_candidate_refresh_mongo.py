@@ -118,7 +118,10 @@ _REQUIRED_TS_COLLECTIONS = {
 
 
 def _utc(ms=0):
-    return datetime(2026, 1, 1, 12, 0, 0, ms * 1000, tzinfo=timezone.utc)
+    return datetime(
+        2026, 1, 1, 12, 0, 0,
+        tzinfo=timezone.utc,
+    ) + timedelta(milliseconds=ms)
 
 
 def _canonical_identity(version, candidate_id, caller_key):
