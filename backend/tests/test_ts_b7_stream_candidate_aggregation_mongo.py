@@ -213,7 +213,7 @@ def _stream():
                 OpportunitySpecId(OPPORTUNITY_SPEC_ID), EntityVersion(OPPORTUNITY_VERSION),
             ),
             requirement_version=EntityVersion(REQUIREMENT_VERSION),
-            captured_at=_utc(3),
+            captured_at=_utc(1),
         ),
         state=TalentStreamState.ACTIVE,
         created_at=_utc(1),
