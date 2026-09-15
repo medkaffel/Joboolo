@@ -91,7 +91,7 @@ async def test_empty_db_remains_empty(db):
     before = await snapshot(db)
     report = await check_database(db)
     assert not report.ok
-    assert len(report.diagnostics) == 14
+    assert len(report.diagnostics) == 16
     assert {d.code for d in report.diagnostics} == {"missing_collection"}
     assert await snapshot(db) == before == {}
 
