@@ -543,7 +543,8 @@ class _FakeCandidateRepository:
     def _same_publication(state, *, target_state_version, generation_id,
                           stream_version, requirement_version, role_dna_id,
                           role_dna_version, opportunity_spec_id,
-                          opportunity_spec_version, candidate_count):
+                          opportunity_spec_version, candidate_count,
+                          published_at):
         return (
             state.active_generation_id == generation_id
             and state.state_version == target_state_version
@@ -554,6 +555,7 @@ class _FakeCandidateRepository:
             and state.opportunity_spec_id == opportunity_spec_id
             and state.opportunity_spec_version == opportunity_spec_version
             and state.candidate_count == candidate_count
+            and state.published_at == published_at
         )
 
     async def stage_candidates(self, candidates):
@@ -666,6 +668,10 @@ class _FakeCandidateRepository:
             "candidate_count": expected_candidate_count,
         }
         current = self.state
+        if current is None and expected_state is not None:
+            raise StreamCandidateConflictError(
+                "b7 expected projection state mismatch"
+            )
         if current is None:
             target = ProjectionState(
                 stream_id=stream_id,
@@ -684,13 +690,15 @@ class _FakeCandidateRepository:
                 self.state = target
                 return target
             if self._same_publication(
-                self.state, target_state_version=1, **metadata
+                self.state, target_state_version=1, **metadata,
+                published_at=published_at,
             ):
                 return self.state
             raise StreamCandidateConflictError("b7 projection publish conflict")
         if current.active_generation_id == generation_id:
             if self._same_publication(
-                current, target_state_version=current.state_version, **metadata
+                current, target_state_version=current.state_version, **metadata,
+                published_at=published_at,
             ):
                 return current
             raise StreamCandidateConflictError("b7 projection publish conflict")
@@ -937,6 +945,151 @@ class TestRetryIdempotency:
         assert str(exc.value) == SCOPE_CHANGED_MSG
         state = _run(repo.get_projection_state(STREAM_ID))
         assert state.active_generation_id == _generation_id()
+
+
+class TestSameCommandDifferentRefreshAt:
+    def test_non_empty_same_command_different_refresh_at_conflicts(self):
+        apps = _FakeApplications([
+            _application("app-1", "cand-1", ms=20),
+            _application("app-2", "cand-2", ms=30),
+        ])
+        service, _, repo = _build_refresh(apps=apps)
+        first = _run(service.refresh(_command()))
+        assert first.generation_id == _generation_id()
+        assert first.state_version == 1
+        assert first.published_at == REFRESH_AT
+        with pytest.raises(StreamCandidateRefreshConflictError) as exc:
+            _run(service.refresh(_command(refresh_at=_utc(950))))
+        assert str(exc.value) == SCOPE_CHANGED_MSG
+        state = _run(repo.get_projection_state(STREAM_ID))
+        assert state.active_generation_id == _generation_id()
+        assert state.state_version == 1
+        assert state.published_at == REFRESH_AT
+        assert len(repo.documents) == 2
+
+    def test_empty_same_command_different_refresh_at_conflicts(self):
+        service, _, repo = _build_refresh(apps=_FakeApplications())
+        first = _run(service.refresh(_command()))
+        assert first.candidate_count == 0
+        assert first.published_at == REFRESH_AT
+        with pytest.raises(StreamCandidateRefreshConflictError) as exc:
+            _run(service.refresh(_command(refresh_at=_utc(950))))
+        assert str(exc.value) == SCOPE_CHANGED_MSG
+        state = _run(repo.get_projection_state(STREAM_ID))
+        assert state.active_generation_id == _generation_id()
+        assert state.state_version == 1
+        assert state.published_at == REFRESH_AT
+        assert repo.documents == {}
+
+    def test_empty_same_command_same_refresh_at_stays_idempotent(self):
+        service, _, repo = _build_refresh(apps=_FakeApplications())
+        first = _run(service.refresh(_command()))
+        second = _run(service.refresh(_command()))
+        assert second.generation_id == first.generation_id
+        assert second.state_version == 1
+        assert second.published_at == first.published_at == REFRESH_AT
+
+
+class TestCasExpectedStateGone:
+    def test_publish_with_expected_state_but_no_current_state_conflicts(self):
+        expected = ProjectionState(
+            stream_id=STREAM_ID,
+            state_version=4,
+            active_generation_id="previous-gen",
+            stream_version=STREAM_VERSION,
+            requirement_version=REQUIREMENT_VERSION,
+            role_dna_id=ROLE_DNA_ID,
+            role_dna_version=ROLE_DNA_VERSION,
+            opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+            opportunity_spec_version=OPPORTUNITY_VERSION,
+            candidate_count=0,
+            published_at=_utc(800),
+        )
+        repo = _FakeCandidateRepository(state=None)
+        with pytest.raises(StreamCandidateConflictError) as exc:
+            _run(repo.publish_generation(
+                STREAM_ID,
+                generation_id="previous-gen",
+                stream_version=STREAM_VERSION,
+                requirement_version=REQUIREMENT_VERSION,
+                role_dna_id=ROLE_DNA_ID,
+                role_dna_version=ROLE_DNA_VERSION,
+                opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+                opportunity_spec_version=OPPORTUNITY_VERSION,
+                expected_candidate_count=0,
+                expected_state=expected,
+                published_at=_utc(800),
+            ))
+        assert str(exc.value) == "b7 expected projection state mismatch"
+        assert repo.state is None
+
+    def test_publish_with_no_expected_state_but_current_exists_conflicts(self):
+        current = ProjectionState(
+            stream_id=STREAM_ID,
+            state_version=1,
+            active_generation_id="published-gen",
+            stream_version=STREAM_VERSION,
+            requirement_version=REQUIREMENT_VERSION,
+            role_dna_id=ROLE_DNA_ID,
+            role_dna_version=ROLE_DNA_VERSION,
+            opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+            opportunity_spec_version=OPPORTUNITY_VERSION,
+            candidate_count=0,
+            published_at=_utc(700),
+        )
+        repo = _FakeCandidateRepository(state=current)
+        with pytest.raises(StreamCandidateConflictError) as exc:
+            _run(repo.publish_generation(
+                STREAM_ID,
+                generation_id="other-gen",
+                stream_version=STREAM_VERSION,
+                requirement_version=REQUIREMENT_VERSION,
+                role_dna_id=ROLE_DNA_ID,
+                role_dna_version=ROLE_DNA_VERSION,
+                opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+                opportunity_spec_version=OPPORTUNITY_VERSION,
+                expected_candidate_count=0,
+                expected_state=None,
+                published_at=_utc(800),
+            ))
+        assert str(exc.value) == "b7 expected projection state mismatch"
+        state = _run(repo.get_projection_state(STREAM_ID))
+        assert state.state_version == 1
+        assert state.published_at == _utc(700)
+
+    def test_publish_same_generation_retry_requires_matching_published_at(self):
+        repo = _FakeCandidateRepository(
+            state=ProjectionState(
+                stream_id=STREAM_ID,
+                state_version=1,
+                active_generation_id="published-gen",
+                stream_version=STREAM_VERSION,
+                requirement_version=REQUIREMENT_VERSION,
+                role_dna_id=ROLE_DNA_ID,
+                role_dna_version=ROLE_DNA_VERSION,
+                opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+                opportunity_spec_version=OPPORTUNITY_VERSION,
+                candidate_count=0,
+                published_at=_utc(700),
+            )
+        )
+        with pytest.raises(StreamCandidateConflictError) as exc:
+            _run(repo.publish_generation(
+                STREAM_ID,
+                generation_id="published-gen",
+                stream_version=STREAM_VERSION,
+                requirement_version=REQUIREMENT_VERSION,
+                role_dna_id=ROLE_DNA_ID,
+                role_dna_version=ROLE_DNA_VERSION,
+                opportunity_spec_id=OPPORTUNITY_SPEC_ID,
+                opportunity_spec_version=OPPORTUNITY_VERSION,
+                expected_candidate_count=0,
+                expected_state=None,
+                published_at=_utc(800),
+            ))
+        assert str(exc.value) == "b7 projection publish conflict"
+        state = _run(repo.get_projection_state(STREAM_ID))
+        assert state.published_at == _utc(700)
 
 
 class TestConcurrency:

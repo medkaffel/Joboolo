@@ -110,13 +110,13 @@ def test_stream_candidate_round_trip_single_source_only(source, name):
         key: (getattr(kept, key) if key == source else None)
         for key in ("application_evidence", "declared_interest_evidence",
                     "shared_favorite_evidence", "discovery_evidence")
-    }, professional_match_summary=None, opportunity_fit_summary=None, computed_at=None)
+    }, professional_match_summary=None, opportunity_fit_summary=None)
     assert stream_candidate_from_document(stream_candidate_to_document(candidate)) == candidate
 
 
 def test_stream_candidate_round_trip_multi_source_no_summaries():
     candidate = _candidate(
-        professional_match_summary=None, opportunity_fit_summary=None, computed_at=None
+        professional_match_summary=None, opportunity_fit_summary=None
     )
     assert stream_candidate_from_document(stream_candidate_to_document(candidate)) == candidate
 
@@ -203,7 +203,7 @@ def test_stream_candidate_rejects_unknown_or_sensitive_document_field(extra):
 @pytest.mark.parametrize("missing", [
     "_id", "schema_version", "stream_id", "stream_version", "requirement_version",
     "generation_id", "candidate_id", "role_dna_id", "role_dna_version",
-    "opportunity_spec_id", "opportunity_spec_version",
+    "opportunity_spec_id", "opportunity_spec_version", "computed_at",
 ])
 def test_stream_candidate_rejects_missing_required_field(missing):
     document = stream_candidate_to_document(_candidate())

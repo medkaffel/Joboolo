@@ -724,6 +724,70 @@ class TestB5WithdrawalValidation:
         assert len(sources.shared_favorites) == 1
         assert sources.shared_favorites[0].correlation_id == "corr_2"
     
+    def test_b5_two_shares_same_correlation_both_active(self):
+        share1 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(100), "caller_key_share_1")
+        share2 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(200), "caller_key_share_2")
+        docs = [_event_to_doc(share1), _event_to_doc(share2)]
+        result = reduce_intent_sources(docs, JobId("job_1"))
+
+        _, sources = result.by_candidate[0]
+        assert len(sources.shared_favorites) == 2
+        assert [ev.correlation_id for ev in sources.shared_favorites] == ["corr_same", "corr_same"]
+        assert str(sources.shared_favorites[0].event_id) != str(sources.shared_favorites[1].event_id)
+
+    def test_b5_withdraw_first_share_of_same_correlation_keeps_second(self):
+        share1 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(100), "caller_key_share_1")
+        share2 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(200), "caller_key_share_2")
+        withdraw = _make_b5_withdraw_event(
+            "cand_1", "job_1", "corr_same", str(share1.event_id), _utc(300), "caller_key_withdraw_1"
+        )
+        docs = [_event_to_doc(share1), _event_to_doc(share2), _event_to_doc(withdraw)]
+        result = reduce_intent_sources(docs, JobId("job_1"))
+
+        _, sources = result.by_candidate[0]
+        assert len(sources.shared_favorites) == 1
+        assert str(sources.shared_favorites[0].event_id) == str(share2.event_id)
+
+    def test_b5_withdraw_second_share_of_same_correlation_keeps_first(self):
+        share1 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(100), "caller_key_share_1")
+        share2 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(200), "caller_key_share_2")
+        withdraw = _make_b5_withdraw_event(
+            "cand_1", "job_1", "corr_same", str(share2.event_id), _utc(300), "caller_key_withdraw_2"
+        )
+        docs = [_event_to_doc(share1), _event_to_doc(share2), _event_to_doc(withdraw)]
+        result = reduce_intent_sources(docs, JobId("job_1"))
+
+        _, sources = result.by_candidate[0]
+        assert len(sources.shared_favorites) == 1
+        assert str(sources.shared_favorites[0].event_id) == str(share1.event_id)
+
+    def test_b5_multiple_withdrawals_same_share_keep_sibling(self):
+        share1 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(100), "caller_key_share_1")
+        share2 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(200), "caller_key_share_2")
+        withdraw1 = _make_b5_withdraw_event(
+            "cand_1", "job_1", "corr_same", str(share1.event_id), _utc(300), "caller_key_withdraw_1"
+        )
+        withdraw2 = _make_b5_withdraw_event(
+            "cand_1", "job_1", "corr_same", str(share1.event_id), _utc(400), "caller_key_withdraw_2"
+        )
+        docs = [_event_to_doc(share1), _event_to_doc(share2),
+                _event_to_doc(withdraw1), _event_to_doc(withdraw2)]
+        result = reduce_intent_sources(docs, JobId("job_1"))
+
+        _, sources = result.by_candidate[0]
+        assert len(sources.shared_favorites) == 1
+        assert str(sources.shared_favorites[0].event_id) == str(share2.event_id)
+
+    def test_b5_withdraw_raises_on_unrelated_correlation_even_with_valid_causation(self):
+        share1 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(100), "caller_key_share_1")
+        share2 = _make_b5_share_event("cand_1", "job_1", "corr_same", _utc(200), "caller_key_share_2")
+        withdraw = _make_b5_withdraw_event(
+            "cand_1", "job_1", "corr_other", str(share2.event_id), _utc(300), "caller_key_withdraw_3"
+        )
+        docs = [_event_to_doc(share1), _event_to_doc(share2), _event_to_doc(withdraw)]
+        with pytest.raises(B5ValidationError, match="correlation does not match"):
+            reduce_intent_sources(docs, JobId("job_1"))
+
     def test_b5_withdraw_valid_before_share_in_input(self):
         # Order independence: a withdrawal document encountered BEFORE the share
         # is valid as long as business timestamps are coherent (withdraw >= share).
@@ -805,7 +869,7 @@ class TestB5WithdrawalValidation:
             "cand_1", "job_1", "corr_2", str(share.event_id), _utc(200)
         )
         docs = [_event_to_doc(share), _event_to_doc(withdraw)]
-        with pytest.raises(B5ValidationError, match="non-existent share"):
+        with pytest.raises(B5ValidationError, match="correlation does not match"):
             reduce_intent_sources(docs, JobId("job_1"))
     
     def test_b5_withdraw_cross_candidate_fails(self):
@@ -838,7 +902,7 @@ class TestB5WithdrawalValidation:
             "cand_1", "job_1", "corr_1", "ts-b5-share-event-v1:sha256:" + "b" * 64, _utc(200)
         )
         docs = [_event_to_doc(share), _event_to_doc(withdraw)]
-        with pytest.raises(B5ValidationError, match="causation_id does not reference"):
+        with pytest.raises(B5ValidationError, match="targets non-existent share"):
             reduce_intent_sources(docs, JobId("job_1"))
     
     def test_b5_withdraw_digest_mismatch_fails(self):
@@ -950,8 +1014,10 @@ class TestReducerOutputStructure:
             assert type(sources.shared_favorites) is tuple
     
     def test_shared_favorites_sorted_deterministic(self):
-        share1 = _make_b5_share_event("cand_1", "job_1", "corr_a", _utc(200))
-        share2 = _make_b5_share_event("cand_1", "job_1", "corr_b", _utc(100))
+        share1 = _make_b5_share_event("cand_1", "job_1", "corr_a", _utc(200),
+                                      caller_idempotency_key="caller_key_a")
+        share2 = _make_b5_share_event("cand_1", "job_1", "corr_b", _utc(100),
+                                      caller_idempotency_key="caller_key_b")
         docs = [_event_to_doc(share1), _event_to_doc(share2)]
         result = reduce_intent_sources(docs, JobId("job_1"))
         

@@ -193,13 +193,13 @@ class StreamCandidate:
     role_dna_version: EntityVersion
     opportunity_spec_id: OpportunitySpecId
     opportunity_spec_version: EntityVersion
+    computed_at: datetime
     application_evidence: Optional[ApplicationEvidence] = None
     declared_interest_evidence: Optional[DeclaredInterestEvidence] = None
     shared_favorite_evidence: Optional[SharedFavoriteEvidence] = None
     discovery_evidence: Optional[DiscoveryEvidence] = None
     professional_match_summary: Optional[ProfessionalMatchSummary] = None
     opportunity_fit_summary: Optional[OpportunityFitSummary] = None
-    computed_at: datetime = None
 
     def __post_init__(self) -> None:
         nonblank_identifier(self.stream_id, "stream_id")
@@ -227,12 +227,11 @@ class StreamCandidate:
             "opportunity_spec_version",
             positive_entity_version(self.opportunity_spec_version, "opportunity_spec_version"),
         )
-        if self.computed_at is not None:
-            object.__setattr__(
-                self,
-                "computed_at",
-                utc_millisecond(self.computed_at, "computed_at"),
-            )
+        object.__setattr__(
+            self,
+            "computed_at",
+            utc_millisecond(self.computed_at, "computed_at"),
+        )
 
         sources_present = sum(
             1

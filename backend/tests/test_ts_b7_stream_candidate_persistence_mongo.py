@@ -97,13 +97,13 @@ def _candidate_set(stream_id, generation_id, count, **overrides):
             kwargs = {key: None for key in (
                 "declared_interest_evidence", "shared_favorite_evidence",
                 "discovery_evidence", "professional_match_summary",
-                "opportunity_fit_summary", "computed_at")}
+                "opportunity_fit_summary")}
             kwargs["application_evidence"] = ApplicationEvidence(f"app-{index}", "active", _utc(index + 1))
         else:
             kwargs = {key: None for key in (
                 "application_evidence", "shared_favorite_evidence",
                 "discovery_evidence", "professional_match_summary",
-                "opportunity_fit_summary", "computed_at")}
+                "opportunity_fit_summary")}
             kwargs["declared_interest_evidence"] = DeclaredInterestEvidence(f"declared-{index}", _utc(index + 1))
         candidates.append(_candidate(
             application_evidence=kwargs.get("application_evidence"),
@@ -112,7 +112,7 @@ def _candidate_set(stream_id, generation_id, count, **overrides):
             discovery_evidence=kwargs.get("discovery_evidence"),
             professional_match_summary=kwargs.get("professional_match_summary"),
             opportunity_fit_summary=kwargs.get("opportunity_fit_summary"),
-            computed_at=kwargs.get("computed_at"),
+            computed_at=_utc(7),
             stream_id=stream_id,
             generation_id=generation_id,
             candidate_id=candidate_id,

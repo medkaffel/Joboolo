@@ -871,6 +871,75 @@ class TestBuildSources:
         assert cand.shared_favorite_evidence.occurred_at == _utc(125)
         assert cand.declared_interest_evidence is None
 
+    def test_two_active_shares_same_correlation_representative_is_latest(self):
+        share1 = _make_b5_share_event("cand-c", JOB_ID, "corr-same", _utc(120),
+                                      caller_idempotency_key="key-one")
+        share2 = _make_b5_share_event("cand-c", JOB_ID, "corr-same", _utc(125),
+                                      caller_idempotency_key="key-two")
+        events = self._events_by_type((share1, share2))
+        saved = {("cand-c", JOB_ID, "corr-same"): _saved_job("cand-c", "corr-same")}
+        service = self._service(events=events, saved=saved)
+        result = _run(service.build_generation(
+            STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
+        ))
+        assert result.candidate_count == 1
+        cand = result.candidates[0]
+        assert cand.shared_favorite_evidence is not None
+        assert cand.shared_favorite_evidence.correlation_id == "corr-same"
+        assert cand.shared_favorite_evidence.occurred_at == _utc(125)
+        assert str(cand.shared_favorite_evidence.event_id) == str(share2.event_id)
+
+    def test_withdrawal_of_first_same_correlation_share_leaves_second_as_representative(self):
+        share1 = _make_b5_share_event("cand-c", JOB_ID, "corr-same", _utc(120),
+                                      caller_idempotency_key="key-one")
+        share2 = _make_b5_share_event("cand-c", JOB_ID, "corr-same", _utc(125),
+                                      caller_idempotency_key="key-two")
+        withdraw = _make_b5_withdraw_event("cand-c", JOB_ID, "corr-same",
+                                           str(share1.event_id), _utc(130))
+        events = self._events_by_type((share1, share2, withdraw))
+        saved = {("cand-c", JOB_ID, "corr-same"): _saved_job("cand-c", "corr-same")}
+        service = self._service(events=events, saved=saved)
+        result = _run(service.build_generation(
+            STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
+        ))
+        assert result.candidate_count == 1
+        cand = result.candidates[0]
+        assert cand.shared_favorite_evidence is not None
+        assert cand.shared_favorite_evidence.occurred_at == _utc(125)
+        assert str(cand.shared_favorite_evidence.event_id) == str(share2.event_id)
+
+    def test_withdrawal_of_second_same_correlation_share_leaves_first_as_representative(self):
+        share1 = _make_b5_share_event("cand-c", JOB_ID, "corr-same", _utc(120),
+                                      caller_idempotency_key="key-one")
+        share2 = _make_b5_share_event("cand-c", JOB_ID, "corr-same", _utc(125),
+                                      caller_idempotency_key="key-two")
+        withdraw = _make_b5_withdraw_event("cand-c", JOB_ID, "corr-same",
+                                           str(share2.event_id), _utc(130))
+        events = self._events_by_type((share1, share2, withdraw))
+        saved = {("cand-c", JOB_ID, "corr-same"): _saved_job("cand-c", "corr-same")}
+        service = self._service(events=events, saved=saved)
+        result = _run(service.build_generation(
+            STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
+        ))
+        assert result.candidate_count == 1
+        cand = result.candidates[0]
+        assert cand.shared_favorite_evidence is not None
+        assert cand.shared_favorite_evidence.occurred_at == _utc(120)
+        assert str(cand.shared_favorite_evidence.event_id) == str(share1.event_id)
+
+    def test_withdrawal_wrong_correlation_with_valid_causation_fails_closed(self):
+        share = _make_b5_share_event("cand-c", JOB_ID, "corr-same", _utc(120))
+        withdraw = _make_b5_withdraw_event("cand-c", JOB_ID, "corr-other",
+                                           str(share.event_id), _utc(130))
+        events = self._events_by_type((share, withdraw))
+        saved = {("cand-c", JOB_ID, "corr-same"): _saved_job("cand-c", "corr-same")}
+        service = self._service(events=events, saved=saved)
+        with pytest.raises(StreamCandidateAggregationStoredDataError) as exc:
+            _run(service.build_generation(
+                STREAM_ID, generation_id=GENERATION_ID, computed_at=_utc(500),
+            ))
+        assert str(exc.value) == STORED_MSG
+
     def test_share_with_cancelled_saved_job_is_dropped(self):
         share = _make_b5_share_event("cand-x", JOB_ID, "corr-x", _utc(120))
         events = self._events_by_type((share,))

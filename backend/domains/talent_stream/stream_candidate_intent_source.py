@@ -181,9 +181,10 @@ def _validate_b5_withdrawal_event(
     all_shares: Dict[str, TalentIntentEvent],
 ) -> None:
     """Strict B5 withdrawal validation. Fail closed on any violation.
-    
-    Unlike the share validation, this does not require the share to be already processed.
-    It validates against all shares for this candidate/job.
+
+    Shares are looked up by their canonical event_id through the causation_id.
+    Unlike the share validation, this does not require the share to be already
+    processed: it validates against all shares for this candidate/job.
     """
     if event.schema_version != INTENT_EVENT_SCHEMA_VERSION:
         raise B5ValidationError("schema_version must be intent-event-v1")
@@ -217,17 +218,16 @@ def _validate_b5_withdrawal_event(
         if getattr(event, field) is not None:
             raise B5ValidationError(f"forbidden field present: {field}")
 
-    target_correlation = str(event.correlation_id)
-    target_share = all_shares.get(target_correlation)
+    target_event_key = str(event.causation_id)
+    target_share = all_shares.get(target_event_key)
     if target_share is None:
         raise B5ValidationError("withdrawal targets non-existent share")
     if target_share.job_id != expected_job_id:
         raise B5ValidationError("withdrawal targets share for different job")
     if target_share.subject.candidate_id != expected_candidate_id:
         raise B5ValidationError("withdrawal targets share for different candidate")
-    # causation_id must reference the target share's event_id
-    if str(target_share.event_id) != str(event.causation_id):
-        raise B5ValidationError("causation_id does not reference the target share")
+    if str(target_share.correlation_id) != str(event.correlation_id):
+        raise B5ValidationError("withdrawal correlation does not match the target share")
     # B5 canonical temporal invariant: withdrawal cannot predate the targeted share.
     if event.occurred_at < target_share.occurred_at:
         raise B5ValidationError("withdrawal cannot predate the targeted share")
@@ -276,13 +276,13 @@ def reduce_intent_sources(
                 b4_events.append(event)
             elif event.event_type == B5_SHARE_EVENT_TYPE:
                 _validate_b5_share_event(event, job_id, candidate_id)
-                correlation_key = str(event.correlation_id)
-                if correlation_key not in b5_shares:
-                    b5_shares[correlation_key] = event
+                event_key = str(event.event_id)
+                if event_key not in b5_shares:
+                    b5_shares[event_key] = event
                 else:
-                    existing = b5_shares[correlation_key]
+                    existing = b5_shares[event_key]
                     if (event.occurred_at, str(event.event_id)) > (existing.occurred_at, str(existing.event_id)):
-                        b5_shares[correlation_key] = event
+                        b5_shares[event_key] = event
             elif event.event_type == B5_WITHDRAW_EVENT_TYPE:
                 b5_withdrawals.append(event)
         
@@ -302,10 +302,9 @@ def reduce_intent_sources(
             )
         
         active_shares = []
-        for correlation_key, share_event in b5_shares.items():
+        for event_key, share_event in b5_shares.items():
             withdrawn = any(
-                str(w.causation_id) == str(share_event.event_id)
-                or str(w.correlation_id) == correlation_key
+                str(w.causation_id) == event_key
                 for w in b5_withdrawals
             )
             if not withdrawn:

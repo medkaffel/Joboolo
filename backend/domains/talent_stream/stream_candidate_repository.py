@@ -36,6 +36,9 @@ _B7_REQUIREMENTS = (
     TALENT_STREAM_CANDIDATE_PROJECTION_STATES_REQUIREMENT,
 )
 
+_PROJECTION_PUBLISH_CONFLICT_MSG = "b7 projection publish conflict"
+_PROJECTION_STATE_MISMATCH_MSG = "b7 expected projection state mismatch"
+
 
 class StreamCandidateRepositoryError(RuntimeError):
     pass
@@ -269,6 +272,7 @@ class StreamCandidateRepository:
         opportunity_spec_id,
         opportunity_spec_version,
         candidate_count,
+        published_at,
     ):
         return (
             state.active_generation_id == generation_id
@@ -280,6 +284,7 @@ class StreamCandidateRepository:
             and state.opportunity_spec_id == opportunity_spec_id
             and state.opportunity_spec_version == opportunity_spec_version
             and state.candidate_count == candidate_count
+            and state.published_at == published_at
         )
 
     def _scope_matches(self, candidate, *, stream_id, generation_id, stream_version,
@@ -322,7 +327,7 @@ class StreamCandidateRepository:
         positive_entity_version(role_dna_version, "role_dna_version")
         positive_entity_version(opportunity_spec_version, "opportunity_spec_version")
         if expected_state is not None and expected_state.stream_id != stream_id:
-            raise StreamCandidateConflictError("b7 expected projection state mismatch")
+            raise StreamCandidateConflictError(_PROJECTION_STATE_MISMATCH_MSG)
         if published_at is None:
             published_at = datetime.now(timezone.utc)
         else:
@@ -371,6 +376,8 @@ class StreamCandidateRepository:
             "opportunity_spec_version": opportunity_spec_version,
             "candidate_count": expected_candidate_count,
         }
+        if current is None and expected_state is not None:
+            raise StreamCandidateConflictError(_PROJECTION_STATE_MISMATCH_MSG)
         if current is None:
             target = ProjectionState(
                 stream_id=stream_id,
@@ -396,20 +403,24 @@ class StreamCandidateRepository:
                 ) from None
             winner = await self._read_state(stream_id)
             if winner is not None and self._same_publication(
-                winner, target_state_version=1, **metadata
+                winner,
+                target_state_version=1,
+                **metadata,
+                published_at=published_at,
             ):
                 return winner
-            raise StreamCandidateConflictError("b7 projection publish conflict")
+            raise StreamCandidateConflictError(_PROJECTION_PUBLISH_CONFLICT_MSG)
         if current.active_generation_id == generation_id:
             if self._same_publication(
                 current,
                 target_state_version=current.state_version,
                 **metadata,
+                published_at=published_at,
             ):
                 return current
-            raise StreamCandidateConflictError("b7 projection publish conflict")
+            raise StreamCandidateConflictError(_PROJECTION_PUBLISH_CONFLICT_MSG)
         if expected_state is None or expected_state != current:
-            raise StreamCandidateConflictError("b7 expected projection state mismatch")
+            raise StreamCandidateConflictError(_PROJECTION_STATE_MISMATCH_MSG)
         target = ProjectionState(
             stream_id=stream_id,
             state_version=current.state_version + 1,
@@ -453,7 +464,8 @@ class StreamCandidateRepository:
                 winner,
                 target_state_version=current.state_version + 1,
                 **metadata,
+                published_at=published_at,
             ):
                 return winner
-            raise StreamCandidateConflictError("b7 projection publish conflict")
+            raise StreamCandidateConflictError(_PROJECTION_PUBLISH_CONFLICT_MSG)
         return target

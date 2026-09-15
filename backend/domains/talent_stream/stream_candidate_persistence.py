@@ -49,9 +49,9 @@ CANDIDATE_REQUIRED = {
     "role_dna_version",
     "opportunity_spec_id",
     "opportunity_spec_version",
+    "computed_at",
 }
 CANDIDATE_OPTIONAL = {
-    "computed_at",
     "application_evidence",
     "declared_interest_evidence",
     "shared_favorite_evidence",
@@ -244,8 +244,9 @@ def stream_candidate_to_document(candidate: StreamCandidate) -> dict:
         "opportunity_spec_id": candidate.opportunity_spec_id,
         "opportunity_spec_version": int(candidate.opportunity_spec_version),
     }
-    if candidate.computed_at is not None:
-        doc["computed_at"] = utc_millisecond(candidate.computed_at, "computed_at")
+    if candidate.computed_at is None:
+        raise ValueError("computed_at is required")
+    doc["computed_at"] = utc_millisecond(candidate.computed_at, "computed_at")
     if candidate.application_evidence is not None:
         doc["application_evidence"] = _application_to_document(candidate.application_evidence)
     if candidate.declared_interest_evidence is not None:
@@ -363,9 +364,8 @@ def stream_candidate_from_document(document: dict) -> StreamCandidate:
         "opportunity_spec_version": positive_entity_version(
             document["opportunity_spec_version"], "opportunity_spec_version"
         ),
+        "computed_at": _storage_datetime(document["computed_at"], "computed_at"),
     }
-    if "computed_at" in document:
-        kwargs["computed_at"] = _storage_datetime(document["computed_at"], "computed_at")
     if "application_evidence" in document:
         kwargs["application_evidence"] = _application_from_document(document["application_evidence"])
     if "declared_interest_evidence" in document:
