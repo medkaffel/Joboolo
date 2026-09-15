@@ -145,7 +145,7 @@ def test_missing_performance_index_is_nonfatal():
 def test_empty_and_conforming_snapshots_remain_unchanged():
     empty = {}
     report = safety.verify_metadata(TS_INDEX_REQUIREMENTS, empty, empty)
-    assert not report.ok and len(report.diagnostics) == 14
+    assert not report.ok and len(report.diagnostics) == 16
     assert empty == {}
     collections, indexes = snapshots()
     original = deepcopy((collections, indexes))
@@ -228,7 +228,7 @@ def test_manifest_matches_shipped_migration_declarations_without_importing_them(
             assert not index.sparse and not index.hidden and index.expire_after_seconds is None
             assert (collection.name, index.name) not in manifest
             manifest[collection.name, index.name] = (index.keys, options)
-    assert len(TS_INDEX_REQUIREMENTS) == 14 and len(manifest) == 33
+    assert len(TS_INDEX_REQUIREMENTS) == 16 and len(manifest) == 35
     assert manifest == shipped
     assert ("recruiter_verifications", "ts_a8_recruiter_verification_state") in manifest
     b1 = next(item for item in TS_INDEX_REQUIREMENTS if item.name == "talent_streams")
@@ -251,3 +251,60 @@ def test_no_mongo_or_mutation_dependency(relative):
         if isinstance(node, ast.Call):
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
             assert name not in forbidden
+
+
+def _b7(name):
+    return next(requirement for requirement in TS_INDEX_REQUIREMENTS if requirement.name == name)
+
+
+def test_b7_candidate_unique_index_contract():
+    requirement = _b7("talent_stream_candidates")
+    assert requirement.simple_collation and requirement.forbid_extra_indexes
+    assert len(requirement.indexes) == 1
+    index = requirement.indexes[0]
+    assert index.name == "ts_b7_stream_generation_candidate_unique"
+    assert index.keys == (("stream_id", 1), ("generation_id", 1), ("candidate_id", 1))
+    assert index.unique and index.critical
+    assert index.partial_filter is None
+    assert not index.sparse and not index.hidden and index.expire_after_seconds is None
+
+
+def test_b7_projection_states_native_identity_only():
+    requirement = _b7("talent_stream_candidate_projection_states")
+    assert requirement.simple_collation and requirement.forbid_extra_indexes
+    assert requirement.indexes == ()
+
+
+def test_b7_manifest_counts_and_ttl_policy():
+    b7 = (_b7("talent_stream_candidates"), _b7("talent_stream_candidate_projection_states"))
+    assert len(b7) == 2
+    assert all(item.ordinary and item.forbid_ttl and item.simple_collation for item in b7)
+    assert sum(1 for item in TS_INDEX_REQUIREMENTS) == 16
+    assert sum(len(item.indexes) for item in TS_INDEX_REQUIREMENTS) == 35
+
+
+def test_b7_intent_job_event_scan_contract():
+    requirement = _b7("talent_intent_events")
+    assert requirement.simple_collation and requirement.forbid_extra_indexes
+    assert [index.name for index in requirement.indexes] == [
+        "ts_a11_idempotency_key_unique", "ts_b7_intent_job_event_scan",
+    ]
+    scan = requirement.indexes[1]
+    assert scan.name == "ts_b7_intent_job_event_scan"
+    assert scan.keys == (
+        ("job_id", 1), ("event_type", 1), ("occurred_at", 1), ("_id", 1),
+    )
+    assert scan.unique is False and scan.critical is False
+    assert scan.partial_filter is None
+    assert not scan.sparse and not scan.hidden and scan.expire_after_seconds is None
+    assert scan.collation is None
+    assert A11_REQUIREMENT.indexes[0].unique and A11_REQUIREMENT.indexes[0].critical
+
+
+def test_b7_intent_scan_index_only_shipped_by_b7_migration():
+    a11_source = (BACKEND / "scripts" / "migrate_ts_a11_intent_event_indexes.py").read_text(encoding="utf-8")
+    assert "ts_b7_intent_job_event_scan" not in a11_source
+    for path in sorted((BACKEND / "scripts").glob("migrate_ts_*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "ts_b7_intent_job_event_scan" in source:
+            assert path.name == "migrate_ts_b7_stream_candidate_projection.py"

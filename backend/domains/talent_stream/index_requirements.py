@@ -1,11 +1,12 @@
-"""Shipped A1-B1 metadata contracts, owned by Talent Stream.
+"""Shipped A1-B7 metadata contracts, owned by Talent Stream.
 
-14 authoritative collections, 33 secondary indexes. Unique identities/version
+16 authoritative collections, 35 secondary indexes. Unique identities/version
 constraints are correctness-critical; lookup indexes are performance-only.
 All index provisioning remains explicit-migration-only. No derived collections,
 legacy startup indexes, or A14 storage is included. A5/A6/A12 add none.
 Absent explicit collation inherits the collection default, exactly as the
-existing migrations do; A11 explicitly requires simple collation throughout.
+existing migrations do; A11, the B7 candidates collection, the B7 projection states
+collection and the B7 Intent job event scan require simple collation throughout.
 Expiry lookup indexes are not TTL or authorization rules.
 """
 from mongo_index_safety import CollectionRequirement, IndexRequirement
@@ -44,6 +45,60 @@ CANDIDATE_PREFERENCES_REQUIREMENT = CollectionRequirement(
             },
         ),
     ),
+)
+
+
+TALENT_STREAM_CANDIDATES_REQUIREMENT = CollectionRequirement(
+    "talent_stream_candidates",
+    (
+        _index(
+            "ts_b7_stream_generation_candidate_unique",
+            "stream_id",
+            "generation_id",
+            "candidate_id",
+            unique=True,
+        ),
+    ),
+    simple_collation=True,
+    forbid_extra_indexes=True,
+)
+
+
+TALENT_STREAM_CANDIDATE_PROJECTION_STATES_REQUIREMENT = CollectionRequirement(
+    "talent_stream_candidate_projection_states",
+    (),
+    simple_collation=True,
+    forbid_extra_indexes=True,
+)
+
+
+# B7.2 performance index provisioned by migrate_ts_b7_stream_candidate_projection.py.
+# Non-critical for A13: absent, it only produces an A13 warning and never blocks
+# B4/B5 writers. It is the mandatory B7 intent lookup contract for the STEP 3
+# Intent event reader, which may require it as a blocking B7 readiness guard.
+TS_B7_INTENT_JOB_EVENT_SCAN = _index(
+    "ts_b7_intent_job_event_scan",
+    "job_id",
+    "event_type",
+    "occurred_at",
+    "_id",
+)
+
+
+TALENT_INTENT_EVENTS_REQUIREMENT = CollectionRequirement(
+    "talent_intent_events",
+    (
+        _index(
+            "ts_a11_idempotency_key_unique",
+            "idempotency_key",
+            unique=True,
+            strings=("idempotency_key",),
+            simple=True,
+        ),
+        TS_B7_INTENT_JOB_EVENT_SCAN,
+    ),
+    simple_collation=True,
+    forbid_extra_indexes=True,
 )
 
 
@@ -111,10 +166,11 @@ TS_INDEX_REQUIREMENTS = (
         _index("ts_a10_privacy_candidate_timeline", "candidate_id", "occurred_at"),
     )),
     # migrate_ts_a11_intent_event_indexes.py: strict metadata preflight retained.
-    CollectionRequirement("talent_intent_events", (
-        _index("ts_a11_idempotency_key_unique", "idempotency_key", unique=True,
-               strings=("idempotency_key",), simple=True),
-    ), simple_collation=True, forbid_extra_indexes=True),
+    # migrate_ts_b7_stream_candidate_projection.py: B7 Intent job event scan index.
+    TALENT_INTENT_EVENTS_REQUIREMENT,
     # TS-B1-001: stable Stream identity is enforced by native _id_ only.
     TALENT_STREAM_REQUIREMENT,
+    # migrate_ts_b7_stream_candidate_projection.py
+    TALENT_STREAM_CANDIDATES_REQUIREMENT,
+    TALENT_STREAM_CANDIDATE_PROJECTION_STATES_REQUIREMENT,
 )
