@@ -193,6 +193,24 @@ def _publish(repository, *, stream_id, generation_id, expected_candidate_count,
     )
 
 
+async def _provision_a11_baseline(database):
+    existing = set(await database.list_collection_names())
+    if "talent_intent_events" not in existing:
+        await database.create_collection("talent_intent_events", collation={"locale": "simple"})
+    await database["talent_intent_events"].create_index(
+        [("idempotency_key", 1)],
+        name="ts_a11_idempotency_key_unique",
+        unique=True,
+        partialFilterExpression={"idempotency_key": {"$type": "string"}},
+        collation={"locale": "simple"},
+    )
+
+
+async def _migrate_b7_ready(database):
+    await _provision_a11_baseline(database)
+    return await migrate(database, apply=True)
+
+
 @pytest.mark.asyncio
 async def test_1_migration_preflight_without_apply_is_immutable(b7_db):
     result = await preflight(b7_db)
@@ -205,13 +223,33 @@ async def test_1_migration_preflight_without_apply_is_immutable(b7_db):
 
 
 @pytest.mark.asyncio
+async def test_1b_apply_requires_a11_baseline_and_mutates_nothing(b7_db):
+    with pytest.raises(B7MigrationError):
+        await migrate(b7_db, apply=True)
+    assert await b7_db.list_collection_names() == []
+
+
+@pytest.mark.asyncio
+async def test_1c_apply_refuses_intent_collection_without_canonical_index(b7_db):
+    await b7_db.create_collection("talent_intent_events", collation={"locale": "simple"})
+    with pytest.raises(B7MigrationError):
+        await migrate(b7_db, apply=True)
+    collections = set(await b7_db.list_collection_names())
+    assert collections == {"talent_intent_events"}
+    indexes = set(await b7_db["talent_intent_events"].index_information())
+    assert indexes == {"_id_"}
+    assert "ts_a11_idempotency_key_unique" not in indexes
+    assert "ts_b7_intent_job_event_scan" not in indexes
+
+
+@pytest.mark.asyncio
 async def test_2_migration_apply_creates_collections_and_unique_index(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     collections = await b7_db.list_collection_names()
     assert "talent_stream_candidates" in collections
     assert "talent_stream_candidate_projection_states" in collections
     candidate_infos = await b7_db["talent_stream_candidates"].index_information()
-    assert candidate_infos["_id_"]["unique"] is True
+    assert candidate_infos["_id_"]["key"] == [("_id", 1)]
     index = candidate_infos["ts_b7_stream_generation_candidate_unique"]
     assert index["key"] == [("stream_id", 1), ("generation_id", 1), ("candidate_id", 1)]
     assert index["unique"] is True
@@ -221,16 +259,16 @@ async def test_2_migration_apply_creates_collections_and_unique_index(b7_db):
 
 @pytest.mark.asyncio
 async def test_3_migration_is_repeatable_and_does_not_mutate_state(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     before = await _bundle(b7_db)
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     after = await _bundle(b7_db)
     assert before == after
 
 
 @pytest.mark.asyncio
 async def test_4_preflight_fails_closed_on_unexpected_extra_index(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     await b7_db["talent_stream_candidates"].create_index([("candidate_id", 1)], name="rogue_index")
     with pytest.raises(B7MigrationError):
         await preflight(b7_db)
@@ -278,14 +316,14 @@ async def test_6_readiness_fails_fast_before_any_write_when_collections_missing(
 async def test_7_readiness_succeeds_only_after_migration(b7_db):
     with pytest.raises(StreamCandidateReadinessError):
         await StreamCandidateRepository(b7_db).readiness()
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     await StreamCandidateRepository(b7_db).readiness()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("try_idempotent", [True, False])
 async def test_8_publish_initial_generation_and_idempotent_retry(b7_db, try_idempotent):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     candidates = _candidate_set("stream-1", "generation-1", 2)
     await repository.stage_candidates(candidates)
@@ -331,7 +369,7 @@ async def test_8_publish_initial_generation_and_idempotent_retry(b7_db, try_idem
 
 @pytest.mark.asyncio
 async def test_9_second_generation_cas_publication_increments_state_version(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     first = _candidate_set("stream-1", "generation-1", 1)
     await repository.stage_candidates(first)
@@ -355,7 +393,7 @@ async def test_9_second_generation_cas_publication_increments_state_version(b7_d
 
 @pytest.mark.asyncio
 async def test_10_two_initial_publications_race_one_wins_loser_conflicts(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository_a = StreamCandidateRepository(b7_db)
     repository_b = StreamCandidateRepository(b7_db)
     await repository_a.stage_candidates(_candidate_set("stream-1", "generation-a", 1))
@@ -377,7 +415,7 @@ async def test_10_two_initial_publications_race_one_wins_loser_conflicts(b7_db):
 
 @pytest.mark.asyncio
 async def test_11_optimistic_concurrency_effectively_serializes_publications(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository_a = StreamCandidateRepository(b7_db)
     repository_b = StreamCandidateRepository(b7_db)
     await repository_a.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
@@ -405,7 +443,7 @@ async def test_11_optimistic_concurrency_effectively_serializes_publications(b7_
 
 @pytest.mark.asyncio
 async def test_12_exact_publication_retry_is_idempotent(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
     first = await _publish(
@@ -423,7 +461,7 @@ async def test_12_exact_publication_retry_is_idempotent(b7_db):
 
 @pytest.mark.asyncio
 async def test_publish_records_exact_provided_timestamp(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
     state = await _publish(
@@ -440,7 +478,7 @@ async def test_publish_records_exact_provided_timestamp(b7_db):
 
 @pytest.mark.asyncio
 async def test_publish_retry_with_same_timestamp_is_idempotent(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
     first = await _publish(
@@ -454,15 +492,16 @@ async def test_publish_retry_with_same_timestamp_is_idempotent(b7_db):
     )
     assert retry == current == first
     assert (await repository.get_projection_state("stream-1")).state_version == 1
-    assert await repository.get_projection_state("stream-1") == _publish(
+    again = await _publish(
         repository, stream_id="stream-1", generation_id="generation-1",
         expected_candidate_count=1, observed=current, published_at=_utc(901),
     )
+    assert await repository.get_projection_state("stream-1") == again
 
 
 @pytest.mark.asyncio
 async def test_publish_same_generation_different_timestamp_conflicts(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
     await _publish(
@@ -482,7 +521,7 @@ async def test_publish_same_generation_different_timestamp_conflicts(b7_db):
 
 @pytest.mark.asyncio
 async def test_13_zero_candidate_generation_is_valid(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     state = await _publish(
         repository, stream_id="stream-1", generation_id="generation-empty",
@@ -496,7 +535,7 @@ async def test_13_zero_candidate_generation_is_valid(b7_db):
 
 @pytest.mark.asyncio
 async def test_14_staging_duplicate_conflicts_and_identical_retry_is_idempotent(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     candidates = _candidate_set("stream-1", "generation-1", 2)
     await repository.stage_candidates(candidates)
@@ -517,7 +556,7 @@ async def test_14_staging_duplicate_conflicts_and_identical_retry_is_idempotent(
 
 @pytest.mark.asyncio
 async def test_15_staging_exact_retry_is_idempotent(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     same = _candidate_set("stream-1", "generation-1", 1)
     await repository.stage_candidates(same)
@@ -533,7 +572,7 @@ async def test_15_staging_exact_retry_is_idempotent(b7_db):
 
 @pytest.mark.asyncio
 async def test_16_publication_rejects_candidate_count_mismatch(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
     with pytest.raises(StreamCandidateConflictError):
@@ -546,7 +585,7 @@ async def test_16_publication_rejects_candidate_count_mismatch(b7_db):
 
 @pytest.mark.asyncio
 async def test_17_old_generations_remain_readable_after_swap(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 1))
     await _publish(
@@ -568,7 +607,7 @@ async def test_17_old_generations_remain_readable_after_swap(b7_db):
 
 @pytest.mark.asyncio
 async def test_18_pagination_ascending_and_strict_limit(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
     candidates = _candidate_set("stream-1", "generation-1", 5)
     await repository.stage_candidates(candidates)
@@ -592,7 +631,7 @@ async def test_18_pagination_ascending_and_strict_limit(b7_db):
 
 @pytest.mark.asyncio
 async def test_19_publication_never_touches_other_collections(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     await b7_db["talent_streams"].insert_one({"_id": "stream-1", "kind": "intruder"})
     await b7_db["candidate_preferences"].insert_one({"_id": "pref-1"})
     repository = StreamCandidateRepository(b7_db)
@@ -613,7 +652,7 @@ async def test_19_publication_never_touches_other_collections(b7_db):
 
 
 async def _ready_without_intent_scan(database):
-    await migrate(database, apply=True)
+    await _migrate_b7_ready(database)
     await database["talent_intent_events"].drop_index("ts_b7_intent_job_event_scan")
 
 
@@ -641,7 +680,7 @@ async def test_21_apply_false_never_provisions_the_intent_index(b7_db):
 @pytest.mark.asyncio
 async def test_22_apply_true_provisions_exactly_the_intent_scan_index(b7_db):
     await _ready_without_intent_scan(b7_db)
-    result = await migrate(b7_db, apply=True)
+    result = await _migrate_b7_ready(b7_db)
     assert result["intent_index_ready"] is True
     assert result["index_ready"] is True
     intent_infos = await b7_db["talent_intent_events"].index_information()
@@ -659,9 +698,9 @@ async def test_22_apply_true_provisions_exactly_the_intent_scan_index(b7_db):
 
 @pytest.mark.asyncio
 async def test_23_repeatable_migration_remains_identical_with_intent_provisioned(b7_db):
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     before = await _bundle(b7_db)
-    await migrate(b7_db, apply=True)
+    await _migrate_b7_ready(b7_db)
     after = await _bundle(b7_db)
     assert before == after
     intent_infos = await b7_db["talent_intent_events"].index_information()

@@ -6,7 +6,9 @@ Intent job event scan index used exclusively by the future B7 Intent reader.
 Never drops collections/indexes, mutates documents, backfills, repairs, adds TTL
 or touches TalentStream. Preflight strictly inspects existing metadata and B7
 documents and fails closed on any incompatibility, including any non-ordinary,
-non-simple or TTL A11 events collection.
+non-simple or TTL A11 events collection. --apply requires the A11 Intent events
+collection and its canonical idempotency index to already exist and conform;
+the migration never creates the Intent events collection (A11 owns it).
 """
 import argparse
 import asyncio
@@ -91,6 +93,8 @@ def _validate_state_indexes(indexes, options):
 
 
 def _validate_intent_indexes(indexes, options):
+    if A11_IDEMPOTENCY_INDEX.name not in indexes:
+        raise B7MigrationError("Missing canonical A11 idempotency index on Intent events")
     for name, spec in indexes.items():
         if "expireAfterSeconds" in spec:
             raise B7MigrationError("TTL is forbidden on Intent event indexes")
@@ -166,8 +170,12 @@ async def preflight(db):
     return {
         "candidates_collection": CANDIDATES_COLLECTION in collections,
         "projection_states_collection": STATES_COLLECTION in collections,
+        "intent_collection": INTENT_COLLECTION in collections,
         "index_ready": INDEX_NAME in indexes.get(CANDIDATES_COLLECTION, {}),
         "intent_index_ready": INTENT_INDEX_NAME in indexes.get(INTENT_COLLECTION, {}),
+        "a11_idempotency_index_ready": (
+            A11_IDEMPOTENCY_INDEX.name in indexes.get(INTENT_COLLECTION, {})
+        ),
         "candidate_documents_checked": candidate_count,
         "projection_state_documents_checked": state_count,
     }
@@ -180,6 +188,10 @@ async def migrate(db, *, apply=False):
     if not apply:
         return result
     try:
+        if not (result["intent_collection"] and result["a11_idempotency_index_ready"]):
+            raise B7MigrationError(
+                "A11 Intent events baseline is required before B7 migration"
+            )
         if not result["candidates_collection"]:
             await db.create_collection(CANDIDATES_COLLECTION, collation={"locale": "simple"})
         if not result["projection_states_collection"]:
