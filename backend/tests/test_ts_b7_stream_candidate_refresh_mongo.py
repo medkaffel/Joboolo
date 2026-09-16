@@ -54,6 +54,9 @@ from domains.talent_stream.stream_candidate_intent_source import (
     B5_WITHDRAW_EVENT_TYPE,
     B5_WITHDRAW_IDEMPOTENCY_PREFIX,
 )
+from domains.talent_stream.stream_candidate_persistence import (
+    generation_record_document_id,
+)
 from domains.talent_stream.stream_candidate_refresh import (
     StreamCandidateRefreshCommand,
     StreamCandidateRefreshConflictError,
@@ -562,6 +565,44 @@ async def test_2_same_command_retry_is_idempotent(b7_db):
     assert second.generation_id == _expected_generation_id("cmd-1")
     assert await b7_db.talent_stream_candidate_projection_states.count_documents({}) == 1
     assert await b7_db.talent_stream_candidates.count_documents({}) == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupted_seal_resumes_on_exact_command_retry(b7_db):
+    service = await provision(
+        b7_db, applications=[_application("app-1", "cand-a", ms=30)],
+    )
+    first = await service.refresh(_command("cmd-1", refresh_ms=500))
+    assert first.candidate_count == 1
+    record_id = generation_record_document_id(STREAM_ID, first.generation_id)
+    await b7_db.talent_stream_candidate_generations.update_one(
+        {"_id": record_id},
+        {"$set": {"state": "sealing", "candidate_count": 1}},
+    )
+    second = await service.refresh(_command("cmd-1", refresh_ms=500))
+    assert second == first
+    assert second.state_version == 1
+    stored = await b7_db.talent_stream_candidate_generations.find_one({"_id": record_id})
+    assert stored["state"] == "sealed" and stored["candidate_count"] == 1
+    assert await b7_db.talent_stream_candidates.count_documents({}) == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupted_seal_wrong_count_conflicts_without_repair(b7_db):
+    service = await provision(
+        b7_db, applications=[_application("app-1", "cand-a", ms=30)],
+    )
+    first = await service.refresh(_command("cmd-1", refresh_ms=500))
+    record_id = generation_record_document_id(STREAM_ID, first.generation_id)
+    await b7_db.talent_stream_candidate_generations.update_one(
+        {"_id": record_id},
+        {"$set": {"state": "sealing", "candidate_count": 2}},
+    )
+    with pytest.raises(StreamCandidateRefreshConflictError) as exc:
+        await service.refresh(_command("cmd-1", refresh_ms=500))
+    assert str(exc.value) == SCOPE_CHANGED_MSG
+    stored = await b7_db.talent_stream_candidate_generations.find_one({"_id": record_id})
+    assert stored["state"] == "sealing" and stored["candidate_count"] == 2
 
 
 @pytest.mark.asyncio

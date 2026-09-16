@@ -69,6 +69,7 @@ from domains.talent_stream.stream_candidate_persistence import (
     generation_record_document_id,
     generation_record_from_document,
     generation_record_to_document,
+    staging_batch_fingerprint,
     stream_candidate_from_document,
     stream_candidate_to_document,
 )
@@ -680,16 +681,10 @@ class _FakeCandidateRepository:
                     "b7 sealed generation candidate count mismatch"
                 )
             return record
-        staged = [
-            document
-            for document in self.documents.values()
-            if document.get("stream_id") == stream_id
-            and document.get("generation_id") == generation_id
-        ]
-        if len(staged) != candidate_count:
-            raise StreamCandidateConflictError("b7 generation candidate count mismatch")
-        sealed_document = generation_record_to_document(
-            StreamCandidateGenerationRecord(
+        if record.state is GenerationState.BUILDING:
+            if record.staging_batch_id is not None:
+                raise StreamCandidateConflictError("b7 generation seal conflict")
+            pending_record = StreamCandidateGenerationRecord(
                 stream_id=record.stream_id,
                 generation_id=record.generation_id,
                 stream_version=record.stream_version,
@@ -698,10 +693,37 @@ class _FakeCandidateRepository:
                 role_dna_version=record.role_dna_version,
                 opportunity_spec_id=record.opportunity_spec_id,
                 opportunity_spec_version=record.opportunity_spec_version,
-                state=GenerationState.SEALED,
+                state=GenerationState.SEALING,
                 candidate_count=candidate_count,
             )
+            self.generations[generation_record_document_id(
+                stream_id, generation_id
+            )] = generation_record_to_document(pending_record)
+        elif record.candidate_count != candidate_count:
+            raise StreamCandidateConflictError(
+                "b7 interrupted seal retry count mismatch"
+            )
+        staged = [
+            document
+            for document in self.documents.values()
+            if document.get("stream_id") == stream_id
+            and document.get("generation_id") == generation_id
+        ]
+        if len(staged) != candidate_count:
+            raise StreamCandidateConflictError("b7 generation candidate count mismatch")
+        sealed_record = StreamCandidateGenerationRecord(
+            stream_id=record.stream_id,
+            generation_id=record.generation_id,
+            stream_version=record.stream_version,
+            requirement_version=record.requirement_version,
+            role_dna_id=record.role_dna_id,
+            role_dna_version=record.role_dna_version,
+            opportunity_spec_id=record.opportunity_spec_id,
+            opportunity_spec_version=record.opportunity_spec_version,
+            state=GenerationState.SEALED,
+            candidate_count=candidate_count,
         )
+        sealed_document = generation_record_to_document(sealed_record)
         self.generations[generation_record_document_id(stream_id, generation_id)] = (
             sealed_document
         )
@@ -764,9 +786,25 @@ class _FakeCandidateRepository:
             opportunity_spec_version=first.opportunity_spec_version,
         ):
             raise StreamCandidateConflictError("b7 generation scope mismatch")
-        if record.state is GenerationState.SEALING:
-            raise StreamCandidateConflictError("b7 generation is sealing")
-        sealed = record.state is GenerationState.SEALED
+        if record.state is not GenerationState.BUILDING:
+            return await self._stage_validation_only(
+                first, documents, candidates, record
+            )
+        try:
+            fingerprint = staging_batch_fingerprint(candidates)
+        except ValueError:
+            raise StreamCandidateRepositoryError(
+                "b7 staging received an invalid batch"
+            ) from None
+        if (
+            record.staging_batch_id is not None
+            and record.staging_batch_id != fingerprint
+        ):
+            raise StreamCandidateConflictError("b7 staging batch is already reserved")
+        if record.staging_batch_id is None:
+            self._set_staging_batch(
+                first.stream_id, first.generation_id, fingerprint
+            )
         for candidate, document in zip(candidates, documents):
             stored = self.documents.get(document["_id"])
             if stored is not None:
@@ -775,16 +813,43 @@ class _FakeCandidateRepository:
                         "b7 staging conflicts with an existing candidate document"
                     )
                 continue
-            if sealed:
-                raise StreamCandidateConflictError("b7 generation is sealed")
             self.documents[document["_id"]] = document
         if self.flip_streams is not None:
             self.flip_streams.force_changed()
+        self._set_staging_batch(first.stream_id, first.generation_id, None)
         return {
             "stream_id": first.stream_id,
             "generation_id": first.generation_id,
             "staged": len(documents),
         }
+
+    async def _stage_validation_only(self, first, documents, candidates, record):
+        message = (
+            "b7 generation is sealing"
+            if record.state is GenerationState.SEALING
+            else "b7 generation is sealed"
+        )
+        for candidate, document in zip(candidates, documents):
+            stored = self.documents.get(document["_id"])
+            if stored is None or stream_candidate_from_document(stored) != candidate:
+                raise StreamCandidateConflictError(message)
+        return {
+            "stream_id": first.stream_id,
+            "generation_id": first.generation_id,
+            "staged": 0,
+        }
+
+    def _set_staging_batch(self, stream_id, generation_id, fingerprint):
+        record_id = generation_record_document_id(stream_id, generation_id)
+        document = self.generations.get(record_id)
+        if document is None:
+            return
+        document = dict(document)
+        if fingerprint is None:
+            document.pop("staging_batch_id", None)
+        else:
+            document["staging_batch_id"] = fingerprint
+        self.generations[record_id] = document
 
     async def publish_generation(
         self,
@@ -806,9 +871,8 @@ class _FakeCandidateRepository:
                 "b7 candidate projection storage is not ready"
             )
         if published_at is None:
-            published_at = utc_millisecond(datetime.now(timezone.utc), "published_at")
-        else:
-            published_at = utc_millisecond(published_at, "published_at")
+            raise ValueError("invalid stream candidate publication timestamp")
+        published_at = utc_millisecond(published_at, "published_at")
         if expected_state is not None and expected_state.stream_id != stream_id:
             raise StreamCandidateConflictError("b7 expected projection state mismatch")
         record = self._generation(stream_id, generation_id)

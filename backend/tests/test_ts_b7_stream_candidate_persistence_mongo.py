@@ -5,6 +5,7 @@ Run only when an explicit B7_MONGO_URL targets a standalone local Mongo
 installed. Each test uses an isolated random database test_ts_b7_<uuid> and
 drops only that database. No MONGO_URL/DB_NAME/admins/grants are touched.
 """
+import asyncio
 import os
 import sys
 import uuid
@@ -36,12 +37,16 @@ from domains.talent_stream.stream_candidate_persistence import (
     TALENT_STREAM_CANDIDATE_PROJECTION_STATE_SCHEMA_VERSION,
     TALENT_STREAM_CANDIDATE_SCHEMA_VERSION,
     GenerationState,
+    ProjectionState,
     StreamCandidateGenerationRecord,
     candidate_document_id,
     generation_record_document_id,
     generation_record_from_document,
     generation_record_to_document,
+    projection_state_to_document,
+    staging_batch_fingerprint,
     stream_candidate_from_document,
+    stream_candidate_to_document,
 )
 from domains.talent_stream.stream_candidate_repository import (
     StreamCandidateConflictError,
@@ -235,6 +240,36 @@ async def _provision_a11_baseline(database):
 async def _migrate_b7_ready(database):
     await _provision_a11_baseline(database)
     return await migrate(database, apply=True)
+
+
+class _InterceptCollection:
+    """Test-only throttle on the staging reserve CAS; forwards everything else.
+
+    This wrapper pauses the staging writer right after it CAS-reserves the
+    staging batch lock on the generation record, so a test can interleave a
+    sealing attempt while staging still holds the lock — without adding any
+    production hooks.
+    """
+
+    def __init__(self, wrapped, sync_event):
+        self._wrapped = wrapped
+        self._sync_event = sync_event
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    async def update_one(self, filter, update, *args, **kwargs):
+        result = await self._wrapped.update_one(filter, update, *args, **kwargs)
+        query = filter or {}
+        patch = (update or {}).get("$set", {})
+        reserving = (
+            query.get("staging_batch_id") == {"$exists": False}
+            and isinstance(patch.get("staging_batch_id"), str)
+        )
+        if reserving:
+            self._sync_event.set()
+            await asyncio.sleep(0)
+        return result
 
 
 @pytest.mark.asyncio
@@ -848,9 +883,12 @@ async def test_seal_count_mismatch_with_staged_documents_conflicts(b7_db):
         await _seal(repository, stream_id="stream-1", generation_id="generation-1",
                     candidate_count=2)
     assert str(exc.value) == "b7 generation candidate count mismatch"
-    record = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
-                         candidate_count=1)
-    assert record.state is GenerationState.SEALED
+    pending = await repository._read_generation_record("stream-1", "generation-1")
+    assert pending.state is GenerationState.SEALING and pending.candidate_count == 2
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                    candidate_count=1)
+    assert str(exc.value) == "b7 interrupted seal retry count mismatch"
 
 
 @pytest.mark.asyncio
@@ -890,6 +928,218 @@ async def test_interrupted_seal_resumes_only_by_exact_retry(b7_db):
     sealed = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
                          candidate_count=1)
     assert sealed.state is GenerationState.SEALED and sealed.candidate_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_on_sealing_is_validation_only_and_exact_replay_idempotent(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    batch = _candidate_set("stream-1", "generation-1", 1)
+    await repository.stage_candidates(batch)
+    await b7_db["talent_stream_candidate_generations"].update_one(
+        {"_id": generation_record_document_id("stream-1", "generation-1")},
+        {"$set": {"state": "sealing", "candidate_count": 1}},
+    )
+    result = await repository.stage_candidates(batch)
+    assert result["staged"] == 0 and result["idempotent_retries"] == 1
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 1
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await repository.stage_candidates(_candidate_set("stream-1", "generation-1", 2))
+    assert str(exc.value) == "b7 generation is sealing"
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 1
+    sealed = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                         candidate_count=1)
+    assert sealed.state is GenerationState.SEALED
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_on_sealed_exact_replay_is_idempotent(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    batch = _candidate_set("stream-1", "generation-1", 1)
+    await repository.stage_candidates(batch)
+    await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                candidate_count=1)
+    result = await repository.stage_candidates(batch)
+    assert result["staged"] == 0 and result["idempotent_retries"] == 1
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupted_staging_same_fingerprint_resumes_and_releases(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    batch = _candidate_set("stream-1", "generation-1", 1)
+    fingerprint = staging_batch_fingerprint(batch)
+    record_id = generation_record_document_id("stream-1", "generation-1")
+    await b7_db["talent_stream_candidate_generations"].update_one(
+        {"_id": record_id},
+        {"$set": {"staging_batch_id": fingerprint}},
+    )
+    result = await repository.stage_candidates(batch)
+    assert result["staged"] == 1 and result["idempotent_retries"] == 0
+    stored = await b7_db["talent_stream_candidate_generations"].find_one({"_id": record_id})
+    assert "staging_batch_id" not in stored
+    sealed = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                         candidate_count=1)
+    assert sealed.state is GenerationState.SEALED
+
+
+@pytest.mark.asyncio
+async def test_interrupted_staging_different_fingerprint_conflicts_while_locked(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    batch = _candidate_set("stream-1", "generation-1", 1)
+    record_id = generation_record_document_id("stream-1", "generation-1")
+    await b7_db["talent_stream_candidate_generations"].update_one(
+        {"_id": record_id},
+        {"$set": {"staging_batch_id": staging_batch_fingerprint(batch)}},
+    )
+    other = _candidate_set("stream-1", "generation-1", 1, candidate_id="candidate-9")
+    assert staging_batch_fingerprint(other) != staging_batch_fingerprint(batch)
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await repository.stage_candidates(other)
+    assert str(exc.value) == "b7 staging batch is already reserved"
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 0
+
+
+@pytest.mark.asyncio
+async def test_stage_and_seal_race_interleaving_via_collection_wrapper(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    batch = _candidate_set("stream-1", "generation-1", 2)
+    sync = asyncio.Event()
+    repository.generations = _InterceptCollection(
+        b7_db["talent_stream_candidate_generations"], sync
+    )
+    staging_task = asyncio.create_task(repository.stage_candidates(batch))
+    await asyncio.wait_for(sync.wait(), timeout=10)
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                    candidate_count=2)
+    assert str(exc.value) == "b7 generation seal conflict"
+    result = await staging_task
+    assert result["staged"] == 2
+    record = await repository._read_generation_record("stream-1", "generation-1")
+    assert record.state is GenerationState.BUILDING and record.staging_batch_id is None
+    sealed = await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                         candidate_count=2)
+    assert sealed.state is GenerationState.SEALED
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 2
+
+
+def _fail_closed_record_and_state(*, state_scope_delta=0, state_count_delta=0):
+    record = StreamCandidateGenerationRecord(
+        stream_id="stream-1", generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        state=GenerationState.SEALED, candidate_count=1,
+    )
+    state = ProjectionState(
+        stream_id="stream-1", state_version=1,
+        active_generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1",
+        role_dna_version=4 + state_scope_delta,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        candidate_count=1 + state_count_delta, published_at=_utc(900),
+    )
+    return record, state
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_closed_on_generation_record_state_scope_mismatch(b7_db):
+    await _provision_a11_baseline(b7_db)
+    record, state = _fail_closed_record_and_state(state_scope_delta=1)
+    await b7_db["talent_stream_candidate_generations"].insert_one(
+        generation_record_to_document(record)
+    )
+    await b7_db["talent_stream_candidate_projection_states"].insert_one(
+        projection_state_to_document(state)
+    )
+    with pytest.raises(B7MigrationError):
+        await preflight(b7_db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_closed_on_state_candidate_count_mismatch(b7_db):
+    await _provision_a11_baseline(b7_db)
+    record, state = _fail_closed_record_and_state(state_count_delta=1)
+    await b7_db["talent_stream_candidate_generations"].insert_one(
+        generation_record_to_document(record)
+    )
+    await b7_db["talent_stream_candidate_projection_states"].insert_one(
+        projection_state_to_document(state)
+    )
+    with pytest.raises(B7MigrationError):
+        await preflight(b7_db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_closed_on_candidate_documents_count_mismatch(b7_db):
+    await _provision_a11_baseline(b7_db)
+    record = StreamCandidateGenerationRecord(
+        stream_id="stream-1", generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        state=GenerationState.SEALED, candidate_count=1,
+    )
+    state = ProjectionState(
+        stream_id="stream-1", state_version=1,
+        active_generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        candidate_count=1, published_at=_utc(900),
+    )
+    await b7_db["talent_stream_candidate_generations"].insert_one(
+        generation_record_to_document(record)
+    )
+    await b7_db["talent_stream_candidate_projection_states"].insert_one(
+        projection_state_to_document(state)
+    )
+    await b7_db["talent_stream_candidates"].insert_many([
+        stream_candidate_to_document(candidate)
+        for candidate in _candidate_set("stream-1", "generation-1", 2)
+    ])
+    with pytest.raises(B7MigrationError):
+        await preflight(b7_db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_zero_candidate_state_scope_mismatch_fails_closed(b7_db):
+    await _provision_a11_baseline(b7_db)
+    record = StreamCandidateGenerationRecord(
+        stream_id="stream-1", generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        state=GenerationState.SEALED, candidate_count=0,
+    )
+    state = ProjectionState(
+        stream_id="stream-1", state_version=1,
+        active_generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=5,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        candidate_count=0, published_at=_utc(900),
+    )
+    await b7_db["talent_stream_candidate_generations"].insert_one(
+        generation_record_to_document(record)
+    )
+    await b7_db["talent_stream_candidate_projection_states"].insert_one(
+        projection_state_to_document(state)
+    )
+    with pytest.raises(B7MigrationError):
+        await preflight(b7_db)
 
 
 async def _ready_without_intent_scan(database):

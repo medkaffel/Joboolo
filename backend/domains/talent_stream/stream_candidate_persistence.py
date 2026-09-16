@@ -41,6 +41,7 @@ TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION = (
 )
 TS_B7_CANDIDATE_PREFIX = "ts-b7-candidate-v1"
 TS_B7_GENERATION_RECORD_PREFIX = "ts-b7-generation-record-v1"
+TS_B7_STAGE_BATCH_PREFIX = "ts-b7-stage-batch-v1"
 
 CANDIDATE_REQUIRED = {
     "_id",
@@ -99,11 +100,14 @@ GENERATION_RECORD_FIELDS = {
 class GenerationState(Enum):
     """Closed lifecycle for one registered B7 generation.
 
-    BUILDING records may accumulate candidate documents. SEALING is the
-    persisted transitional lock recorded atomically with the promised
-    candidate_count; it is strictly internal, refuses all staging and is only
-    resumable by an exact seal retry that reproduces the same count. SEALED is
-    permanent and immutable; a sealed generation is never reopened.
+    BUILDING records may accumulate candidate documents and may carry a
+    staging_batch_id locking one deterministic fingerprinted batch, so staging
+    and sealing never race: a batch is reserved before any insert and released
+    only after every requested document is verified. SEALING is the persisted
+    transitional lock recorded atomically with the promised candidate_count; it
+    is strictly internal, refuses all staging and is only resumable by an exact
+    seal retry that reproduces the same count. SEALED is permanent and
+    immutable; a sealed generation is never reopened.
     """
 
     BUILDING = "building"
@@ -134,7 +138,22 @@ _OPPORTUNITY_FIT_FIELDS = {
 
 
 def _canonical_json(value):
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=_canonical_json_default,
+    ).encode("utf-8")
+
+
+def _canonical_json_default(value):
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise TypeError("naive datetimes are not canonical")
+        return int(
+            (value - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds() * 1000
+        )
+    raise TypeError(f"Object of type {value.__class__.__name__} is not serializable")
 
 
 def candidate_document_id(stream_id: str, generation_id: str, candidate_id: str) -> str:
@@ -310,6 +329,39 @@ def stream_candidate_to_document(candidate: StreamCandidate) -> dict:
             candidate.opportunity_fit_summary
         )
     return doc
+
+
+def _staging_batch_fingerprint(value, field):
+    """Strict format validation for a B7 staging batch fingerprint."""
+    if type(value) is not str:
+        raise ValueError(f"{field} must be a string")
+    prefix = f"{TS_B7_STAGE_BATCH_PREFIX}:sha256:"
+    if not value.startswith(prefix):
+        raise ValueError(f"invalid {field}")
+    digest = value[len(prefix):]
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(f"invalid {field}")
+    return value
+
+
+def staging_batch_fingerprint(candidates) -> str:
+    """Deterministic fingerprint of one full canonical B7 staging batch.
+
+    The digest covers the exact canonical BSON documents (never a blind
+    dataclasses view) sorted by stable document identity, so a retry reproduces
+    the identical fingerprint without any clock or UUID involvement and any
+    content change derives a different fingerprint.
+    """
+    if type(candidates) not in (list, tuple) or not candidates:
+        raise ValueError("staging requires a non-empty batch")
+    if any(type(candidate) is not StreamCandidate for candidate in candidates):
+        raise ValueError("staging received an invalid candidate")
+    documents = [stream_candidate_to_document(candidate) for candidate in candidates]
+    ordered = sorted(documents, key=lambda document: document["_id"])
+    digest = sha256(
+        _canonical_json([TS_B7_STAGE_BATCH_PREFIX, ordered])
+    ).hexdigest()
+    return f"{TS_B7_STAGE_BATCH_PREFIX}:sha256:{digest}"
 
 
 def _application_from_document(value):
@@ -526,8 +578,10 @@ def projection_state_from_document(document: dict) -> ProjectionState:
 class StreamCandidateGenerationRecord:
     """Immutable B7 generation lifecycle record; holds no candidate data.
 
-    A BUILDING record carries no candidate_count; SEALING and SEALED records
-    always carry the exact sealed count. The state is the sole write authority:
+    A BUILDING record carries no candidate_count and may optionally carry a
+    staging_batch_id fingerprint locking exactly one fingerprinted staging
+    batch; SEALING and SEALED records always carry the exact sealed count and
+    never carry a staging batch lock. The state is the sole write authority:
     candidate documents only ever accumulate during BUILDING, and a SEALED
     generation is permanently immutable.
     """
@@ -542,6 +596,7 @@ class StreamCandidateGenerationRecord:
     opportunity_spec_version: int
     state: GenerationState
     candidate_count: int | None
+    staging_batch_id: str | None = None
     schema_version: str = TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -553,6 +608,14 @@ class StreamCandidateGenerationRecord:
         nonblank_identifier(self.opportunity_spec_id, "opportunity_spec_id")
         if type(self.state) is not GenerationState:
             raise ValueError("invalid generation state")
+        if self.staging_batch_id is not None:
+            object.__setattr__(
+                self,
+                "staging_batch_id",
+                _staging_batch_fingerprint(self.staging_batch_id, "staging_batch_id"),
+            )
+            if self.state is not GenerationState.BUILDING:
+                raise ValueError("staging_batch_id is only allowed while building")
         if self.state is GenerationState.BUILDING:
             if self.candidate_count is not None:
                 raise ValueError("building generations must not carry a candidate_count")
@@ -594,12 +657,17 @@ def generation_record_to_document(record: StreamCandidateGenerationRecord) -> di
     }
     if record.candidate_count is not None:
         document["candidate_count"] = int(record.candidate_count)
+    if record.staging_batch_id is not None:
+        document["staging_batch_id"] = record.staging_batch_id
     return document
 
 
 def generation_record_from_document(document: dict) -> StreamCandidateGenerationRecord:
     _shape(
-        document, GENERATION_RECORD_FIELDS, {"candidate_count"}, "generation record"
+        document,
+        GENERATION_RECORD_FIELDS,
+        {"candidate_count", "staging_batch_id"},
+        "generation record",
     )
     if document["schema_version"] != TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION:
         raise ValueError("unsupported generation record schema version")
@@ -632,4 +700,6 @@ def generation_record_from_document(document: dict) -> StreamCandidateGeneration
         kwargs["candidate_count"] = document["candidate_count"]
     elif state is not GenerationState.BUILDING:
         raise ValueError("generation record candidate_count is required once sealing")
+    if "staging_batch_id" in document:
+        kwargs["staging_batch_id"] = document["staging_batch_id"]
     return StreamCandidateGenerationRecord(**kwargs)

@@ -10,9 +10,11 @@ non-simple or TTL A11 events collection. When B7 candidates or projection
 states already exist, the generation registry must already hold an exact
 SEALED record for every referenced generation; missing, unsealed or
 mismatched-scope/count records fail closed without repair (the migration never
-fabricates a registry for pre-existing data). --apply requires the A11 Intent
-events collection and its canonical idempotency index to already exist and
-conform; the migration never creates the Intent events collection (A11 owns it).
+fabricates a registry for pre-existing data), and every ProjectionState must
+match its generation record and its candidate document set exactly. --apply
+requires the A11 Intent events collection and its canonical idempotency index
+to already exist and conform; the migration never creates the Intent events
+collection (A11 owns it).
 """
 import argparse
 import asyncio
@@ -205,6 +207,7 @@ async def preflight(db):
                 candidate_count += 1
         state_count = 0
         published_counts = {}
+        states_by_generation = {}
         if STATES_COLLECTION in collections:
             async for document in db[STATES_COLLECTION].find({}):
                 try:
@@ -213,9 +216,9 @@ async def preflight(db):
                     raise B7MigrationError(
                         "Malformed B7 projection state; no indexes created"
                     ) from exc
-                published_counts[
-                    (str(state.stream_id), str(state.active_generation_id))
-                ] = int(state.candidate_count)
+                state_key = (str(state.stream_id), str(state.active_generation_id))
+                published_counts[state_key] = int(state.candidate_count)
+                states_by_generation[state_key] = state
                 state_count += 1
         referenced = set(generation_scopes) | set(published_counts)
         generations_ready = False
@@ -260,13 +263,46 @@ async def preflight(db):
                     != expected_scope
                 ):
                     raise B7MigrationError("B7 generation registry scope mismatch")
-                expected_count = generation_counts.get(
-                    generation_key, published_counts.get(generation_key)
-                )
+                state = states_by_generation.get(generation_key)
+                doc_count = generation_counts.get(generation_key)
+                if state is not None:
+                    record_scope = (
+                        str(record.stream_id),
+                        str(record.generation_id),
+                        int(record.stream_version),
+                        int(record.requirement_version),
+                        str(record.role_dna_id),
+                        int(record.role_dna_version),
+                        str(record.opportunity_spec_id),
+                        int(record.opportunity_spec_version),
+                    )
+                    state_scope = (
+                        str(state.stream_id),
+                        str(state.active_generation_id),
+                        int(state.stream_version),
+                        int(state.requirement_version),
+                        str(state.role_dna_id),
+                        int(state.role_dna_version),
+                        str(state.opportunity_spec_id),
+                        int(state.opportunity_spec_version),
+                    )
+                    if record_scope != state_scope or (
+                        record.candidate_count is None
+                        or int(record.candidate_count) != int(state.candidate_count)
+                    ):
+                        raise B7MigrationError(
+                            "B7 generation registry differs from ProjectionState scope/candidate count"
+                        )
+                    if doc_count is not None and int(state.candidate_count) != doc_count:
+                        raise B7MigrationError(
+                            "B7 candidate documents count differs from ProjectionState"
+                        )
                 if (
-                    record.candidate_count is not None
-                    and expected_count is not None
-                    and int(record.candidate_count) != expected_count
+                    doc_count is not None
+                    and (
+                        record.candidate_count is None
+                        or int(record.candidate_count) != doc_count
+                    )
                 ):
                     raise B7MigrationError(
                         "B7 generation registry candidate count mismatch"
