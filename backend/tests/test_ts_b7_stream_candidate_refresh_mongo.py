@@ -54,6 +54,9 @@ from domains.talent_stream.stream_candidate_intent_source import (
     B5_WITHDRAW_EVENT_TYPE,
     B5_WITHDRAW_IDEMPOTENCY_PREFIX,
 )
+from domains.talent_stream.stream_candidate_aggregation import (
+    StreamCandidateAggregationService,
+)
 from domains.talent_stream.stream_candidate_persistence import (
     generation_record_document_id,
 )
@@ -64,6 +67,9 @@ from domains.talent_stream.stream_candidate_refresh import (
     StreamCandidateRefreshService,
     StreamCandidateRefreshStorageNotReadyError,
     generation_identifier,
+)
+from domains.talent_stream.stream_candidate_repository import (
+    StreamCandidateRepository,
 )
 from domains.talent_stream.stream_models import (
     StreamCommandHistoryEntry,
@@ -572,19 +578,40 @@ async def test_interrupted_seal_resumes_on_exact_command_retry(b7_db):
     service = await provision(
         b7_db, applications=[_application("app-1", "cand-a", ms=30)],
     )
-    first = await service.refresh(_command("cmd-1", refresh_ms=500))
-    assert first.candidate_count == 1
-    record_id = generation_record_document_id(STREAM_ID, first.generation_id)
+    command = _command("cmd-1", refresh_ms=500)
+    generation_id = _expected_generation_id("cmd-1")
+    built = await StreamCandidateAggregationService(b7_db).build_generation(
+        STREAM_ID, generation_id=generation_id, computed_at=command.refresh_at
+    )
+    assert built.candidate_count == 1
+    repository = StreamCandidateRepository(b7_db)
+    await repository.begin_generation(
+        stream_id=str(built.stream_id),
+        generation_id=str(built.generation_id),
+        stream_version=int(built.stream_version),
+        requirement_version=int(built.requirement_version),
+        role_dna_id=str(built.role_dna_id),
+        role_dna_version=int(built.role_dna_version),
+        opportunity_spec_id=str(built.opportunity_spec_id),
+        opportunity_spec_version=int(built.opportunity_spec_version),
+    )
+    await repository.stage_candidates(built.candidates)
+    record_id = generation_record_document_id(STREAM_ID, generation_id)
     await b7_db.talent_stream_candidate_generations.update_one(
         {"_id": record_id},
-        {"$set": {"state": "sealing", "candidate_count": 1}},
+        {"$set": {"state": "sealing", "candidate_count": int(built.candidate_count)}},
     )
-    second = await service.refresh(_command("cmd-1", refresh_ms=500))
-    assert second == first
-    assert second.state_version == 1
+    assert await b7_db.talent_stream_candidate_projection_states.count_documents({}) == 0
+
+    result = await service.refresh(command)
+    assert result.generation_id == generation_id
+    assert result.candidate_count == 1
+    assert result.state_version == 1
+    assert result.published_at == command.refresh_at
     stored = await b7_db.talent_stream_candidate_generations.find_one({"_id": record_id})
     assert stored["state"] == "sealed" and stored["candidate_count"] == 1
     assert await b7_db.talent_stream_candidates.count_documents({}) == 1
+    assert await b7_db.talent_stream_candidate_projection_states.count_documents({}) == 1
 
 
 @pytest.mark.asyncio
@@ -592,15 +619,34 @@ async def test_interrupted_seal_wrong_count_conflicts_without_repair(b7_db):
     service = await provision(
         b7_db, applications=[_application("app-1", "cand-a", ms=30)],
     )
-    first = await service.refresh(_command("cmd-1", refresh_ms=500))
-    record_id = generation_record_document_id(STREAM_ID, first.generation_id)
+    command = _command("cmd-1", refresh_ms=500)
+    generation_id = _expected_generation_id("cmd-1")
+    built = await StreamCandidateAggregationService(b7_db).build_generation(
+        STREAM_ID, generation_id=generation_id, computed_at=command.refresh_at
+    )
+    assert built.candidate_count == 1
+    repository = StreamCandidateRepository(b7_db)
+    await repository.begin_generation(
+        stream_id=str(built.stream_id),
+        generation_id=str(built.generation_id),
+        stream_version=int(built.stream_version),
+        requirement_version=int(built.requirement_version),
+        role_dna_id=str(built.role_dna_id),
+        role_dna_version=int(built.role_dna_version),
+        opportunity_spec_id=str(built.opportunity_spec_id),
+        opportunity_spec_version=int(built.opportunity_spec_version),
+    )
+    await repository.stage_candidates(built.candidates)
+    record_id = generation_record_document_id(STREAM_ID, generation_id)
     await b7_db.talent_stream_candidate_generations.update_one(
         {"_id": record_id},
         {"$set": {"state": "sealing", "candidate_count": 2}},
     )
+    assert await b7_db.talent_stream_candidate_projection_states.count_documents({}) == 0
     with pytest.raises(StreamCandidateRefreshConflictError) as exc:
-        await service.refresh(_command("cmd-1", refresh_ms=500))
+        await service.refresh(command)
     assert str(exc.value) == SCOPE_CHANGED_MSG
+    assert await b7_db.talent_stream_candidate_projection_states.count_documents({}) == 0
     stored = await b7_db.talent_stream_candidate_generations.find_one({"_id": record_id})
     assert stored["state"] == "sealing" and stored["candidate_count"] == 2
 

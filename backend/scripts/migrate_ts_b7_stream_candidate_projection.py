@@ -266,6 +266,7 @@ async def preflight(db):
                 state = states_by_generation.get(generation_key)
                 doc_count = generation_counts.get(generation_key)
                 if state is not None:
+                    doc_count = generation_counts.get(generation_key, 0)
                     record_scope = (
                         str(record.stream_id),
                         str(record.generation_id),
@@ -293,7 +294,7 @@ async def preflight(db):
                         raise B7MigrationError(
                             "B7 generation registry differs from ProjectionState scope/candidate count"
                         )
-                    if doc_count is not None and int(state.candidate_count) != doc_count:
+                    if int(state.candidate_count) != doc_count:
                         raise B7MigrationError(
                             "B7 candidate documents count differs from ProjectionState"
                         )

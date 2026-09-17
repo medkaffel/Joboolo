@@ -243,17 +243,19 @@ async def _migrate_b7_ready(database):
 
 
 class _InterceptCollection:
-    """Test-only throttle on the staging reserve CAS; forwards everything else.
+    """Test-only barrier on the staging reserve CAS; forwards everything else.
 
-    This wrapper pauses the staging writer right after it CAS-reserves the
-    staging batch lock on the generation record, so a test can interleave a
-    sealing attempt while staging still holds the lock — without adding any
-    production hooks.
+    This wrapper pauses the staging writer AFTER the reserve CAS has actually
+    persisted the staging batch lock on the generation record, and the writer
+    stays blocked until the test raises the release event. A sealing attempt
+    interleaved while the stager is still blocked must therefore observe the
+    reserved lock — a real barrier, not a yield. No production hooks.
     """
 
-    def __init__(self, wrapped, sync_event):
+    def __init__(self, wrapped, reserved_event, release_event):
         self._wrapped = wrapped
-        self._sync_event = sync_event
+        self._reserved_event = reserved_event
+        self._release_event = release_event
 
     def __getattr__(self, name):
         return getattr(self._wrapped, name)
@@ -266,9 +268,9 @@ class _InterceptCollection:
             query.get("staging_batch_id") == {"$exists": False}
             and isinstance(patch.get("staging_batch_id"), str)
         )
-        if reserving:
-            self._sync_event.set()
-            await asyncio.sleep(0)
+        if reserving and result.matched_count:
+            self._reserved_event.set()
+            await self._release_event.wait()
         return result
 
 
@@ -1014,16 +1016,26 @@ async def test_stage_and_seal_race_interleaving_via_collection_wrapper(b7_db):
     repository = StreamCandidateRepository(b7_db)
     await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     batch = _candidate_set("stream-1", "generation-1", 2)
-    sync = asyncio.Event()
+    reserved_event = asyncio.Event()
+    release_event = asyncio.Event()
     repository.generations = _InterceptCollection(
-        b7_db["talent_stream_candidate_generations"], sync
+        b7_db["talent_stream_candidate_generations"], reserved_event, release_event
     )
     staging_task = asyncio.create_task(repository.stage_candidates(batch))
-    await asyncio.wait_for(sync.wait(), timeout=10)
-    with pytest.raises(StreamCandidateConflictError) as exc:
-        await _seal(repository, stream_id="stream-1", generation_id="generation-1",
-                    candidate_count=2)
-    assert str(exc.value) == "b7 generation seal conflict"
+    try:
+        await asyncio.wait_for(reserved_event.wait(), timeout=10)
+        pending = await repository._read_generation_record("stream-1", "generation-1")
+        assert pending.state is GenerationState.BUILDING
+        assert pending.staging_batch_id is not None
+        with pytest.raises(StreamCandidateConflictError) as exc:
+            await _seal(repository, stream_id="stream-1", generation_id="generation-1",
+                        candidate_count=2)
+        assert str(exc.value) == "b7 generation seal conflict"
+        pending = await repository._read_generation_record("stream-1", "generation-1")
+        assert pending.state is GenerationState.BUILDING
+        assert pending.staging_batch_id is not None
+    finally:
+        release_event.set()
     result = await staging_task
     assert result["staged"] == 2
     record = await repository._read_generation_record("stream-1", "generation-1")
@@ -1140,6 +1152,64 @@ async def test_preflight_zero_candidate_state_scope_mismatch_fails_closed(b7_db)
     )
     with pytest.raises(B7MigrationError):
         await preflight(b7_db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_closed_when_sealed_generation_has_zero_documents(b7_db):
+    await _provision_a11_baseline(b7_db)
+    record = StreamCandidateGenerationRecord(
+        stream_id="stream-1", generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        state=GenerationState.SEALED, candidate_count=1,
+    )
+    state = ProjectionState(
+        stream_id="stream-1", state_version=1,
+        active_generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        candidate_count=1, published_at=_utc(900),
+    )
+    await b7_db["talent_stream_candidate_generations"].insert_one(
+        generation_record_to_document(record)
+    )
+    await b7_db["talent_stream_candidate_projection_states"].insert_one(
+        projection_state_to_document(state)
+    )
+    with pytest.raises(B7MigrationError):
+        await preflight(b7_db)
+
+
+@pytest.mark.asyncio
+async def test_preflight_zero_candidate_zero_count_remains_valid(b7_db):
+    await _migrate_b7_ready(b7_db)
+    record = StreamCandidateGenerationRecord(
+        stream_id="stream-1", generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        state=GenerationState.SEALED, candidate_count=0,
+    )
+    state = ProjectionState(
+        stream_id="stream-1", state_version=1,
+        active_generation_id="generation-1",
+        stream_version=3, requirement_version=2,
+        role_dna_id="role-dna-1", role_dna_version=4,
+        opportunity_spec_id="spec-1", opportunity_spec_version=2,
+        candidate_count=0, published_at=_utc(900),
+    )
+    await b7_db["talent_stream_candidate_generations"].insert_one(
+        generation_record_to_document(record)
+    )
+    await b7_db["talent_stream_candidate_projection_states"].insert_one(
+        projection_state_to_document(state)
+    )
+    assert await b7_db["talent_stream_candidates"].count_documents({}) == 0
+    result = await preflight(b7_db)
+    assert result["generations_ready"] is True
+    assert result["generation_records_checked"] == 1
 
 
 async def _ready_without_intent_scan(database):
