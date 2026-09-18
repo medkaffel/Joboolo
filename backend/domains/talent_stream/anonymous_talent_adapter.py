@@ -9,16 +9,11 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
-from domains.privacy.anonymous_talent import (
-    AnonymousTalentFacts,
-    AnonymousTalentCard,
-    render_anonymous_talent_card,
-)
-from domains.matching.opportunity_fit_models import HardEligibilityState, OpportunityFitState
-from domains.profiles.repository import CandidateProfileRepository
+from domains.privacy.anonymous_talent import AnonymousTalentFacts
 from domains.talent_stream.stream_candidate_models import StreamCandidate
+from domains.talent_stream.stream_models import nonblank_identifier
 
 
 class AnonymousTalentAdapterError(RuntimeError):
@@ -27,6 +22,14 @@ class AnonymousTalentAdapterError(RuntimeError):
 
 class AnonymousTalentProjectionUnavailableError(AnonymousTalentAdapterError):
     """Exact profile version mismatch, missing data, or incoherent B7 projection."""
+
+
+@runtime_checkable
+class CandidateProfileReader(Protocol):
+    """Minimal structural contract for reading the current A1 profile."""
+
+    async def get(self, candidate_id: str) -> Optional[dict]:
+        ...
 
 
 def derive_anonymous_talent_card_ref(
@@ -50,6 +53,10 @@ def derive_anonymous_talent_card_ref(
     if type(key) is not bytes or len(key) < 32:
         raise ValueError("card_ref key must be bytes with length >= 32")
 
+    nonblank_identifier(stream_id, "stream_id")
+    nonblank_identifier(generation_id, "generation_id")
+    nonblank_identifier(candidate_id, "candidate_id")
+
     payload = json.dumps(
         ["ts-b8-card-v1", stream_id, generation_id, candidate_id],
         ensure_ascii=False,
@@ -68,18 +75,18 @@ class AnonymousTalentFactsAdapter:
     - professional_match_summary present
     - opportunity_fit_summary present
     - B7 role/opportunity version consistency
-    - Current A1 profile exists and candidate_id matches exactly
+    - Current A1 profile exists and candidate_id matches exactly (no coercion)
     - Current profile version == B7 match profile version (exact)
     """
 
-    profile_repository: CandidateProfileRepository
+    profile_repository: CandidateProfileReader
     card_ref_key: bytes
 
     def __post_init__(self) -> None:
         if type(self.card_ref_key) is not bytes or len(self.card_ref_key) < 32:
             raise ValueError("card_ref_key must be bytes with length >= 32")
-        if not isinstance(self.profile_repository, CandidateProfileRepository):
-            raise ValueError("profile_repository must be a CandidateProfileRepository instance")
+        if not callable(getattr(self.profile_repository, "get", None)):
+            raise ValueError("profile_repository must provide get")
 
     async def build(self, candidate: StreamCandidate) -> AnonymousTalentFacts:
         """Build AnonymousTalentFacts from StreamCandidate and current A1 profile.
@@ -107,7 +114,11 @@ class AnonymousTalentFactsAdapter:
         if profile_doc is None:
             raise AnonymousTalentProjectionUnavailableError("anonymous talent facts unavailable")
 
-        if str(profile_doc.get("candidate_id")) != str(candidate.candidate_id):
+        if type(profile_doc) is not dict:
+            raise AnonymousTalentProjectionUnavailableError("anonymous talent facts unavailable")
+
+        profile_candidate_id = profile_doc.get("candidate_id")
+        if type(profile_candidate_id) is not str or profile_candidate_id != str(candidate.candidate_id):
             raise AnonymousTalentProjectionUnavailableError("anonymous talent facts unavailable")
 
         profile_version = profile_doc.get("version")
@@ -117,8 +128,9 @@ class AnonymousTalentFactsAdapter:
             raise AnonymousTalentProjectionUnavailableError("anonymous talent facts unavailable")
 
         experience_years = profile_doc.get("experience_years")
-        if experience_years is not None and type(experience_years) is not int:
-            raise AnonymousTalentProjectionUnavailableError("anonymous talent facts unavailable")
+        if experience_years is not None:
+            if type(experience_years) is not int or experience_years < 0:
+                raise AnonymousTalentProjectionUnavailableError("anonymous talent facts unavailable")
 
         seniority = profile_doc.get("seniority")
         if seniority is not None and type(seniority) is not str:
@@ -145,6 +157,7 @@ class AnonymousTalentFactsAdapter:
 __all__ = [
     "AnonymousTalentAdapterError",
     "AnonymousTalentProjectionUnavailableError",
+    "CandidateProfileReader",
     "derive_anonymous_talent_card_ref",
     "AnonymousTalentFactsAdapter",
 ]

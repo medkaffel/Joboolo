@@ -20,6 +20,7 @@ from domains.talent_stream.anonymous_talent_adapter import (
     AnonymousTalentAdapterError,
     AnonymousTalentFactsAdapter,
     AnonymousTalentProjectionUnavailableError,
+    CandidateProfileReader,
     derive_anonymous_talent_card_ref,
 )
 from domains.talent_stream.stream_candidate_models import (
@@ -47,6 +48,8 @@ def _make_candidate(
     generation_id: str = "generation-1",
     role_dna_version: int = 1,
     opportunity_spec_version: int = 1,
+    match_role_dna_version: int | None = None,
+    fit_opportunity_spec_version: int | None = None,
     candidate_profile_version: int = 4,
     candidate_preferences_version: int = 2,
     professional_match_score: int = 75,
@@ -78,7 +81,7 @@ def _make_candidate(
         ),
         professional_match_summary=ProfessionalMatchSummary(
             candidate_profile_version=EntityVersion(str(candidate_profile_version)),
-            role_dna_version=EntityVersion(str(role_dna_version)),
+            role_dna_version=EntityVersion(str(match_role_dna_version if match_role_dna_version is not None else role_dna_version)),
             match_engine_version=match_engine_version,
             professional_match_score=professional_match_score,
             evidence_coverage=evidence_coverage,
@@ -86,7 +89,7 @@ def _make_candidate(
         ),
         opportunity_fit_summary=OpportunityFitSummary(
             candidate_preferences_version=EntityVersion(str(candidate_preferences_version)),
-            opportunity_spec_version=EntityVersion(str(opportunity_spec_version)),
+            opportunity_spec_version=EntityVersion(str(fit_opportunity_spec_version if fit_opportunity_spec_version is not None else opportunity_spec_version)),
             fit_engine_version=fit_engine_version,
             hard_eligibility_state=hard_eligibility_state,
             opportunity_fit_state=opportunity_fit_state,
@@ -111,6 +114,23 @@ def _make_profile_doc(
     }
     doc.update(extra_fields)
     return doc
+
+
+class TestCandidateProfileReaderProtocol:
+    def test_fake_repository_accepted(self):
+        repo = FakeCandidateProfileRepository({})
+        # Protocol structural subtyping: no inheritance needed
+        assert isinstance(repo, CandidateProfileReader)
+
+    def test_repository_without_get_rejected(self):
+        class BadRepo:
+            pass
+
+        with pytest.raises(ValueError, match="profile_repository must provide get"):
+            AnonymousTalentFactsAdapter(
+                profile_repository=BadRepo(),
+                card_ref_key=b"a" * 32,
+            )
 
 
 class TestCardRefDeterminism:
@@ -200,6 +220,30 @@ class TestCardRefDeterminism:
         assert "gen-456" not in ref
         assert "cand-789" not in ref
 
+    def test_invalid_stream_id_rejected(self):
+        key = b"a" * 32
+        for invalid in (None, 123, "", "   "):
+            with pytest.raises(ValueError):
+                derive_anonymous_talent_card_ref(
+                    key=key, stream_id=invalid, generation_id="g1", candidate_id="c1"
+                )
+
+    def test_invalid_generation_id_rejected(self):
+        key = b"a" * 32
+        for invalid in (None, 123, "", "   "):
+            with pytest.raises(ValueError):
+                derive_anonymous_talent_card_ref(
+                    key=key, stream_id="s1", generation_id=invalid, candidate_id="c1"
+                )
+
+    def test_invalid_candidate_id_rejected(self):
+        key = b"a" * 32
+        for invalid in (None, 123, "", "   "):
+            with pytest.raises(ValueError):
+                derive_anonymous_talent_card_ref(
+                    key=key, stream_id="s1", generation_id="g1", candidate_id=invalid
+                )
+
 
 class TestAdapterSuccess:
     @pytest.mark.asyncio
@@ -265,6 +309,18 @@ class TestAdapterExactVersionFailClosed:
     async def test_profile_missing_fails(self):
         candidate = _make_candidate()
         repo = FakeCandidateProfileRepository({})
+        adapter = AnonymousTalentFactsAdapter(
+            profile_repository=repo,
+            card_ref_key=b"a" * 32,
+        )
+        with pytest.raises(AnonymousTalentProjectionUnavailableError):
+            await adapter.build(candidate)
+
+    @pytest.mark.asyncio
+    async def test_candidate_id_strict_no_coercion_fails(self):
+        candidate = _make_candidate(candidate_id="123")
+        profile_doc = _make_profile_doc(candidate_id=123, version=4)
+        repo = FakeCandidateProfileRepository({"123": profile_doc})
         adapter = AnonymousTalentFactsAdapter(
             profile_repository=repo,
             card_ref_key=b"a" * 32,
@@ -358,6 +414,44 @@ class TestAdapterExactVersionFailClosed:
         with pytest.raises(AnonymousTalentProjectionUnavailableError):
             await adapter.build(candidate)
 
+    @pytest.mark.asyncio
+    async def test_experience_years_negative_fails(self):
+        candidate = _make_candidate(candidate_profile_version=4)
+        profile_doc = _make_profile_doc(version=4, experience_years=-1)
+        repo = FakeCandidateProfileRepository({"candidate-1": profile_doc})
+        adapter = AnonymousTalentFactsAdapter(
+            profile_repository=repo,
+            card_ref_key=b"a" * 32,
+        )
+        with pytest.raises(
+            AnonymousTalentProjectionUnavailableError,
+            match="^anonymous talent facts unavailable$",
+        ):
+            await adapter.build(candidate)
+
+    @pytest.mark.asyncio
+    async def test_profile_result_not_dict_fails(self):
+        candidate = _make_candidate(candidate_profile_version=4)
+        repo_called = False
+
+        class BadRepo:
+            async def get(self, candidate_id: str):
+                nonlocal repo_called
+                repo_called = True
+                return "not a dict"
+
+        repo = BadRepo()
+        adapter = AnonymousTalentFactsAdapter(
+            profile_repository=repo,
+            card_ref_key=b"a" * 32,
+        )
+        with pytest.raises(
+            AnonymousTalentProjectionUnavailableError,
+            match="^anonymous talent facts unavailable$",
+        ):
+            await adapter.build(candidate)
+        assert repo_called
+
 
 class TestAdapterMissingMatchFit:
     @pytest.mark.asyncio
@@ -434,7 +528,7 @@ class TestAdapterMissingMatchFit:
 class TestAdapterB7Coherence:
     @pytest.mark.asyncio
     async def test_role_version_mismatch_fails(self):
-        candidate = _make_candidate(role_dna_version=2, candidate_profile_version=4)
+        candidate = _make_candidate(role_dna_version=2, match_role_dna_version=1, candidate_profile_version=4)
         profile_doc = _make_profile_doc(version=4)
         repo = FakeCandidateProfileRepository({"candidate-1": profile_doc})
         adapter = AnonymousTalentFactsAdapter(
@@ -446,7 +540,7 @@ class TestAdapterB7Coherence:
 
     @pytest.mark.asyncio
     async def test_opportunity_version_mismatch_fails(self):
-        candidate = _make_candidate(opportunity_spec_version=2, candidate_profile_version=4)
+        candidate = _make_candidate(opportunity_spec_version=2, fit_opportunity_spec_version=1, candidate_profile_version=4)
         profile_doc = _make_profile_doc(version=4)
         repo = FakeCandidateProfileRepository({"candidate-1": profile_doc})
         adapter = AnonymousTalentFactsAdapter(
@@ -455,6 +549,46 @@ class TestAdapterB7Coherence:
         )
         with pytest.raises(AnonymousTalentProjectionUnavailableError):
             await adapter.build(candidate)
+
+    @pytest.mark.asyncio
+    async def test_repo_not_called_on_role_mismatch(self):
+        candidate = _make_candidate(role_dna_version=2, match_role_dna_version=1, candidate_profile_version=4)
+        repo_called = False
+
+        class TrackingRepo(FakeCandidateProfileRepository):
+            async def get(self, candidate_id: str):
+                nonlocal repo_called
+                repo_called = True
+                return _make_profile_doc(version=4)
+
+        repo = TrackingRepo({"candidate-1": _make_profile_doc(version=4)})
+        adapter = AnonymousTalentFactsAdapter(
+            profile_repository=repo,
+            card_ref_key=b"a" * 32,
+        )
+        with pytest.raises(AnonymousTalentProjectionUnavailableError):
+            await adapter.build(candidate)
+        assert not repo_called, "Repository should not be called when B7 role mismatch"
+
+    @pytest.mark.asyncio
+    async def test_repo_not_called_on_opportunity_mismatch(self):
+        candidate = _make_candidate(opportunity_spec_version=2, fit_opportunity_spec_version=1, candidate_profile_version=4)
+        repo_called = False
+
+        class TrackingRepo(FakeCandidateProfileRepository):
+            async def get(self, candidate_id: str):
+                nonlocal repo_called
+                repo_called = True
+                return _make_profile_doc(version=4)
+
+        repo = TrackingRepo({"candidate-1": _make_profile_doc(version=4)})
+        adapter = AnonymousTalentFactsAdapter(
+            profile_repository=repo,
+            card_ref_key=b"a" * 32,
+        )
+        with pytest.raises(AnonymousTalentProjectionUnavailableError):
+            await adapter.build(candidate)
+        assert not repo_called, "Repository should not be called when B7 opportunity mismatch"
 
 
 class TestAdapterInputValidation:
