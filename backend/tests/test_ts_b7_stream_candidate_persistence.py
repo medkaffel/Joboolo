@@ -18,13 +18,22 @@ from domains.talent_stream.stream_candidate_models import (
     StreamCandidate,
 )
 from domains.talent_stream.stream_candidate_persistence import (
+    TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION,
     TALENT_STREAM_CANDIDATE_PROJECTION_STATE_SCHEMA_VERSION,
     TALENT_STREAM_CANDIDATE_SCHEMA_VERSION,
     TS_B7_CANDIDATE_PREFIX,
+    TS_B7_GENERATION_RECORD_PREFIX,
+    TS_B7_STAGE_BATCH_PREFIX,
+    GenerationState,
     ProjectionState,
+    StreamCandidateGenerationRecord,
     candidate_document_id,
+    generation_record_document_id,
+    generation_record_from_document,
+    generation_record_to_document,
     projection_state_from_document,
     projection_state_to_document,
+    staging_batch_fingerprint,
     stream_candidate_from_document,
     stream_candidate_to_document,
 )
@@ -369,6 +378,233 @@ def test_projection_state_rejects_bool_versions():
         _state(role_dna_version=True)
     with pytest.raises(ValueError):
         _state(opportunity_spec_version=True)
+
+
+def _generation_record(**overrides):
+    values = dict(
+        stream_id="stream-123",
+        generation_id="generation-abc",
+        stream_version=3,
+        requirement_version=2,
+        role_dna_id="role-dna-1",
+        role_dna_version=4,
+        opportunity_spec_id="spec-1",
+        opportunity_spec_version=2,
+        state=GenerationState.BUILDING,
+        candidate_count=None,
+    )
+    values.update(overrides)
+    return StreamCandidateGenerationRecord(**values)
+
+
+def test_generation_record_round_trip_building():
+    record = _generation_record()
+    document = generation_record_to_document(record)
+    assert document["_id"] == generation_record_document_id(
+        "stream-123", "generation-abc")
+    assert document["schema_version"] == TALENT_STREAM_CANDIDATE_GENERATIONS_SCHEMA_VERSION
+    assert document["state"] == "building"
+    assert "candidate_count" not in document
+    assert generation_record_from_document(document) == record
+
+
+def test_generation_record_round_trip_sealing_and_sealed():
+    for state in (GenerationState.SEALING, GenerationState.SEALED):
+        record = _generation_record(state=state, candidate_count=3)
+        document = generation_record_to_document(record)
+        assert document["state"] == state.value
+        assert document["candidate_count"] == 3
+        assert generation_record_from_document(document) == record
+
+
+def test_generation_record_document_id_is_deterministic_prefixed_and_bounded():
+    payload = json.dumps(
+        [TS_B7_GENERATION_RECORD_PREFIX, "stream-123", "generation-abc"],
+        ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")
+    expected = f"{TS_B7_GENERATION_RECORD_PREFIX}:sha256:{sha256(payload).hexdigest()}"
+    assert generation_record_document_id("stream-123", "generation-abc") == expected
+    digest = expected.split(":sha256:")[1]
+    assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+    assert generation_record_document_id("stream-123", "generation-other") != expected
+
+
+def test_generation_record_is_immutable():
+    record = _generation_record()
+    with pytest.raises(FrozenInstanceError):
+        record.generation_id = "other"
+
+
+def test_generation_record_building_must_not_carry_candidate_count():
+    with pytest.raises(ValueError):
+        _generation_record(candidate_count=0)
+
+
+def test_generation_record_sealing_or_sealed_requires_candidate_count():
+    for state in (GenerationState.SEALING, GenerationState.SEALED):
+        with pytest.raises(ValueError):
+            _generation_record(state=state)
+
+
+def test_generation_record_accepts_zero_count():
+    record = _generation_record(state=GenerationState.SEALED, candidate_count=0)
+    assert record.candidate_count == 0
+
+
+def test_generation_record_rejects_bool_versions_and_count():
+    with pytest.raises(ValueError):
+        _generation_record(stream_version=True)
+    with pytest.raises(ValueError):
+        _generation_record(requirement_version=True)
+    with pytest.raises(ValueError):
+        _generation_record(role_dna_version=True)
+    with pytest.raises(ValueError):
+        _generation_record(opportunity_spec_version=True)
+    with pytest.raises(ValueError):
+        _generation_record(state=GenerationState.SEALED, candidate_count=True)
+
+
+def test_generation_record_rejects_negative_count():
+    with pytest.raises(ValueError):
+        _generation_record(state=GenerationState.SEALED, candidate_count=-1)
+
+
+def test_generation_record_rejects_unknown_state():
+    with pytest.raises(ValueError):
+        _generation_record(state="published")
+
+
+def test_generation_record_rejects_unknown_schema_version():
+    document = generation_record_to_document(
+        _generation_record(state=GenerationState.SEALED, candidate_count=1))
+    document["schema_version"] = "talent-stream-candidate-generation-v2"
+    with pytest.raises(ValueError):
+        generation_record_from_document(document)
+
+
+def test_generation_record_from_document_rejects_unknown_or_missing_fields():
+    document = generation_record_to_document(_generation_record())
+    document["extra"] = True
+    with pytest.raises(ValueError):
+        generation_record_from_document(document)
+    document = generation_record_to_document(_generation_record())
+    del document["stream_id"]
+    with pytest.raises(ValueError):
+        generation_record_from_document(document)
+
+
+def test_generation_record_from_document_rejects_wrong_deterministic_id():
+    document = generation_record_to_document(_generation_record())
+    document["_id"] = generation_record_document_id(
+        "stream-other", "generation-abc")
+    with pytest.raises(ValueError):
+        generation_record_from_document(document)
+    document = generation_record_to_document(_generation_record())
+    del document["_id"]
+    with pytest.raises(ValueError):
+        generation_record_from_document(document)
+
+
+def test_generation_record_from_document_rejects_sealing_without_count():
+    document = generation_record_to_document(
+        _generation_record(state=GenerationState.SEALED, candidate_count=1))
+    del document["candidate_count"]
+    with pytest.raises(ValueError):
+        generation_record_from_document(document)
+
+
+def _valid_staging_batch_id():
+    return staging_batch_fingerprint([
+        _candidate(candidate_id="candidate-1"),
+        _candidate(candidate_id="candidate-2"),
+    ])
+
+
+def test_generation_record_round_trip_building_with_staging_batch_id():
+    fingerprint = _valid_staging_batch_id()
+    record = _generation_record(staging_batch_id=fingerprint)
+    assert record.staging_batch_id == fingerprint
+    document = generation_record_to_document(record)
+    assert document["staging_batch_id"] == fingerprint
+    assert generation_record_from_document(document) == record
+
+
+def test_generation_record_round_trip_building_without_lock_stays_closed():
+    record = _generation_record()
+    document = generation_record_to_document(record)
+    assert "staging_batch_id" not in document
+    assert generation_record_from_document(document) == record
+
+
+def test_generation_record_sealing_or_sealed_rejects_staging_batch_id():
+    fingerprint = _valid_staging_batch_id()
+    for state in (GenerationState.SEALING, GenerationState.SEALED):
+        with pytest.raises(ValueError):
+            _generation_record(state=state, candidate_count=1,
+                               staging_batch_id=fingerprint)
+
+
+def test_generation_record_rejects_malformed_staging_batch_id():
+    fingerprint = _valid_staging_batch_id()
+    with pytest.raises(ValueError):
+        _generation_record(staging_batch_id=fingerprint.replace(
+            TS_B7_STAGE_BATCH_PREFIX, "ts-b7-other-batch-v1", 1))
+    with pytest.raises(ValueError):
+        _generation_record(staging_batch_id=fingerprint[:-4])
+    with pytest.raises(ValueError):
+        _generation_record(staging_batch_id=fingerprint[:-1] + "Z")
+    with pytest.raises(ValueError):
+        _generation_record(staging_batch_id=fingerprint.upper())
+    with pytest.raises(ValueError):
+        _generation_record(staging_batch_id="")
+    with pytest.raises(ValueError):
+        _generation_record(staging_batch_id=42)
+
+
+def test_generation_record_from_document_rejects_lock_on_non_building_state():
+    fingerprint = _valid_staging_batch_id()
+    for state in (GenerationState.SEALING, GenerationState.SEALED):
+        document = generation_record_to_document(
+            _generation_record(state=state, candidate_count=1))
+        document["staging_batch_id"] = fingerprint
+        with pytest.raises(ValueError):
+            generation_record_from_document(document)
+
+
+def test_staging_batch_fingerprint_is_deterministic_scoped_and_order_free():
+    first = _candidate(candidate_id="candidate-1")
+    second = _candidate(candidate_id="candidate-2", computed_at=_utc(5))
+    expected_prefix = f"{TS_B7_STAGE_BATCH_PREFIX}:sha256:"
+    fwd = staging_batch_fingerprint([first, second])
+    rev = staging_batch_fingerprint([second, first])
+    assert fwd == rev
+    assert fwd.startswith(expected_prefix)
+    assert len(fwd[len(expected_prefix):]) == 64
+    assert staging_batch_fingerprint([first, second]) == fwd
+    changed = _candidate(candidate_id="candidate-2", computed_at=_utc(6))
+    assert staging_batch_fingerprint([first, changed]) != fwd
+    assert staging_batch_fingerprint([_candidate(candidate_id="candidate-1")]) != fwd
+
+
+def test_staging_batch_fingerprint_covers_canonical_optional_content():
+    base = _candidate()
+    fp_no_evidence = staging_batch_fingerprint([base])
+    with_evidence = _candidate(
+        application_evidence=ApplicationEvidence("app-other", "active", _utc(9)),
+    )
+    assert staging_batch_fingerprint([with_evidence]) != fp_no_evidence
+    assert staging_batch_fingerprint(
+        [_candidate(computed_at=_utc(7))]
+    ) != staging_batch_fingerprint([_candidate(computed_at=_utc(8))])
+
+
+def test_staging_batch_fingerprint_rejects_invalid_batches():
+    with pytest.raises(ValueError):
+        staging_batch_fingerprint([])
+    with pytest.raises(ValueError):
+        staging_batch_fingerprint((candidate for candidate in ()))
+    with pytest.raises(ValueError):
+        staging_batch_fingerprint(["not-a-candidate"])
 
 
 def test_b7_intent_job_event_scan_is_declared_for_step_three_reader():

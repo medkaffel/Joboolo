@@ -207,10 +207,12 @@ class StreamCandidateRefreshService:
         built = await self._build(stream_id, generation_id, command.refresh_at)
 
         await self._revalidate(built)
+        await self._begin(built)
         if built.candidate_count:
             for batch in _batches(built.candidates):
                 await self._stage(batch)
         await self._revalidate(built)
+        await self._seal(built)
 
         state = await self._publish(built, expected_state, command.refresh_at)
         return StreamCandidateRefreshResult(
@@ -315,6 +317,57 @@ class StreamCandidateRefreshService:
     async def _stage(self, batch):
         try:
             await self.repository.stage_candidates(batch)
+        except StreamCandidateReadinessError:
+            raise StreamCandidateRefreshStorageNotReadyError(
+                _REFRESH_STORAGE_NOT_READY_MSG
+            ) from None
+        except StreamCandidateConflictError:
+            raise StreamCandidateRefreshConflictError(
+                _REFRESH_SCOPE_CHANGED_MSG
+            ) from None
+        except StreamCandidateRepositoryError:
+            raise StreamCandidateRefreshStoredDataError(
+                _REFRESH_STORED_MSG
+            ) from None
+
+    async def _begin(self, built):
+        try:
+            await self.repository.begin_generation(
+                stream_id=str(built.stream_id),
+                generation_id=str(built.generation_id),
+                stream_version=int(built.stream_version),
+                requirement_version=int(built.requirement_version),
+                role_dna_id=str(built.role_dna_id),
+                role_dna_version=int(built.role_dna_version),
+                opportunity_spec_id=str(built.opportunity_spec_id),
+                opportunity_spec_version=int(built.opportunity_spec_version),
+            )
+        except StreamCandidateReadinessError:
+            raise StreamCandidateRefreshStorageNotReadyError(
+                _REFRESH_STORAGE_NOT_READY_MSG
+            ) from None
+        except StreamCandidateConflictError:
+            raise StreamCandidateRefreshConflictError(
+                _REFRESH_SCOPE_CHANGED_MSG
+            ) from None
+        except StreamCandidateRepositoryError:
+            raise StreamCandidateRefreshStoredDataError(
+                _REFRESH_STORED_MSG
+            ) from None
+
+    async def _seal(self, built):
+        try:
+            await self.repository.seal_generation(
+                stream_id=str(built.stream_id),
+                generation_id=str(built.generation_id),
+                stream_version=int(built.stream_version),
+                requirement_version=int(built.requirement_version),
+                role_dna_id=str(built.role_dna_id),
+                role_dna_version=int(built.role_dna_version),
+                opportunity_spec_id=str(built.opportunity_spec_id),
+                opportunity_spec_version=int(built.opportunity_spec_version),
+                candidate_count=built.candidate_count,
+            )
         except StreamCandidateReadinessError:
             raise StreamCandidateRefreshStorageNotReadyError(
                 _REFRESH_STORAGE_NOT_READY_MSG
