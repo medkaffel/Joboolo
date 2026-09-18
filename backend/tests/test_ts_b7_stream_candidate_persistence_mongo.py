@@ -657,19 +657,39 @@ async def test_14_staging_duplicate_conflicts_and_identical_retry_is_idempotent(
     candidates = _candidate_set("stream-1", "generation-1", 2)
     await _begin(repository, stream_id="stream-1", generation_id="generation-1")
     await repository.stage_candidates(candidates)
+
+    result = await repository.stage_candidates(candidates)
+    assert result["staged"] == 0
+    assert result["idempotent_retries"] == 2
+
     with pytest.raises(StreamCandidateRepositoryError):
         await repository.stage_candidates(candidates + [_candidate(
             stream_id="stream-1", generation_id="generation-1", candidate_id="candidate-1",
         )])
-    conflicting = [_candidate(
-        stream_id="stream-1", generation_id="generation-1", candidate_id="candidate-0",
-        application_evidence=ApplicationEvidence("app-other", "active", _utc(50)),
-    )]
+
+    conflicting = [
+        _candidate(
+            stream_id="stream-1", generation_id="generation-1", candidate_id="candidate-0",
+            application_evidence=ApplicationEvidence("app-other", "active", _utc(50)),
+        )
+    ]
+    conflicting_fingerprint = staging_batch_fingerprint(conflicting)
+
     with pytest.raises(StreamCandidateConflictError):
         await repository.stage_candidates(conflicting)
-    result = await repository.stage_candidates(candidates)
-    assert result["staged"] == 0 and result["idempotent_retries"] == 2
+
+    record = await repository._read_generation_record("stream-1", "generation-1")
+    assert record.state is GenerationState.BUILDING
+    assert record.staging_batch_id == conflicting_fingerprint
+
     assert len(await repository.find_generation("stream-1", "generation-1", limit=100)) == 2
+
+    with pytest.raises(StreamCandidateConflictError) as exc:
+        await _seal(
+            repository, stream_id="stream-1", generation_id="generation-1",
+            candidate_count=2,
+        )
+    assert str(exc.value) == "b7 generation seal conflict"
 
 
 @pytest.mark.asyncio
@@ -786,6 +806,7 @@ async def test_19_publication_never_touches_other_collections(b7_db):
             assert name not in document
 
 
+@pytest.mark.asyncio
 async def test_begin_writes_a_building_record_without_count(b7_db):
     await _migrate_b7_ready(b7_db)
     repository = StreamCandidateRepository(b7_db)
@@ -1002,7 +1023,13 @@ async def test_interrupted_staging_different_fingerprint_conflicts_while_locked(
         {"_id": record_id},
         {"$set": {"staging_batch_id": staging_batch_fingerprint(batch)}},
     )
-    other = _candidate_set("stream-1", "generation-1", 1, candidate_id="candidate-9")
+    other = [
+        _candidate(
+            stream_id="stream-1",
+            generation_id="generation-1",
+            candidate_id="candidate-9",
+        )
+    ]
     assert staging_batch_fingerprint(other) != staging_batch_fingerprint(batch)
     with pytest.raises(StreamCandidateConflictError) as exc:
         await repository.stage_candidates(other)
