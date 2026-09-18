@@ -63,13 +63,13 @@ class AnonymousTalentFacts:
         if not isinstance(self.card_ref, str) or not _CARD_REF_PATTERN.match(self.card_ref):
             raise ValueError("card_ref must match ts-b8-card-v1:<64 lowercase hex>")
         if self.experience_years is not None:
-            if not isinstance(self.experience_years, int) or self.experience_years < 0:
+            if type(self.experience_years) is not int or self.experience_years < 0:
                 raise ValueError("experience_years must be a non-negative integer or None")
-        if self.seniority is not None and not isinstance(self.seniority, str):
+        if self.seniority is not None and type(self.seniority) is not str:
             raise ValueError("seniority must be a string or None")
-        if not isinstance(self.professional_match_score, int) or not 0 <= self.professional_match_score <= 100:
+        if type(self.professional_match_score) is not int or not 0 <= self.professional_match_score <= 100:
             raise ValueError("professional_match_score must be an integer between 0 and 100")
-        if not isinstance(self.match_evidence_coverage, int) or not 0 <= self.match_evidence_coverage <= 100:
+        if type(self.match_evidence_coverage) is not int or not 0 <= self.match_evidence_coverage <= 100:
             raise ValueError("match_evidence_coverage must be an integer between 0 and 100")
         object.__setattr__(self, "hard_eligibility_state", HardEligibilityState(self.hard_eligibility_state))
         object.__setattr__(self, "opportunity_fit_state", OpportunityFitState(self.opportunity_fit_state))

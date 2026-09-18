@@ -40,6 +40,60 @@ class TestAnonymousTalentFactsContract:
         )
         assert facts.experience_years is None
 
+    def test_boolean_rejected_on_experience_years(self):
+        for bool_val in (True, False):
+            with pytest.raises(ValueError):
+                AnonymousTalentFacts(
+                    card_ref="ts-b8-card-v1:" + "a" * 64,
+                    experience_years=bool_val,
+                    seniority=None,
+                    professional_match_score=50,
+                    match_evidence_coverage=50,
+                    hard_eligibility_state=HardEligibilityState.ELIGIBLE,
+                    opportunity_fit_state=OpportunityFitState.COMPATIBLE,
+                )
+
+    def test_boolean_rejected_on_professional_match_score(self):
+        for bool_val in (True, False):
+            with pytest.raises(ValueError):
+                AnonymousTalentFacts(
+                    card_ref="ts-b8-card-v1:" + "a" * 64,
+                    experience_years=5,
+                    seniority=None,
+                    professional_match_score=bool_val,
+                    match_evidence_coverage=50,
+                    hard_eligibility_state=HardEligibilityState.ELIGIBLE,
+                    opportunity_fit_state=OpportunityFitState.COMPATIBLE,
+                )
+
+    def test_boolean_rejected_on_match_evidence_coverage(self):
+        for bool_val in (True, False):
+            with pytest.raises(ValueError):
+                AnonymousTalentFacts(
+                    card_ref="ts-b8-card-v1:" + "a" * 64,
+                    experience_years=5,
+                    seniority=None,
+                    professional_match_score=50,
+                    match_evidence_coverage=bool_val,
+                    hard_eligibility_state=HardEligibilityState.ELIGIBLE,
+                    opportunity_fit_state=OpportunityFitState.COMPATIBLE,
+                )
+
+    def test_valid_ints_accepted(self):
+        for val in (0, 1, 100):
+            facts = AnonymousTalentFacts(
+                card_ref="ts-b8-card-v1:" + "a" * 64,
+                experience_years=val,
+                seniority=None,
+                professional_match_score=val,
+                match_evidence_coverage=val,
+                hard_eligibility_state=HardEligibilityState.ELIGIBLE,
+                opportunity_fit_state=OpportunityFitState.COMPATIBLE,
+            )
+            assert facts.experience_years == val
+            assert facts.professional_match_score == val
+            assert facts.match_evidence_coverage == val
+
     def test_invalid_card_ref_rejected(self):
         with pytest.raises(ValueError, match="card_ref must match"):
             AnonymousTalentFacts(
@@ -405,7 +459,12 @@ class TestOpportunityFitStates:
             assert card.hard_eligibility_state == state
 
     def test_opportunity_fit_states_preserved(self):
-        for state in [OpportunityFitState.COMPATIBLE, OpportunityFitState.INCOMPATIBLE, OpportunityFitState.UNRESOLVED]:
+        for state in [
+            OpportunityFitState.COMPATIBLE,
+            OpportunityFitState.INCOMPATIBLE,
+            OpportunityFitState.UNRESOLVED,
+            OpportunityFitState.NOT_APPLICABLE,
+        ]:
             facts = AnonymousTalentFacts(
                 card_ref="ts-b8-card-v1:" + "a" * 64,
                 experience_years=5,
