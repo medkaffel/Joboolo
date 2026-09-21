@@ -100,6 +100,9 @@ jobs:
             tests/test_ts_b7_stream_candidate_persistence.py
             tests/test_ts_b7_stream_candidate_aggregation.py
             tests/test_ts_b7_stream_candidate_refresh.py
+            tests/test_ts_b8_anonymous_talent_policy.py
+            tests/test_ts_b8_anonymous_talent_adapter.py
+            tests/test_ts_b8_anonymous_talent_service.py
           )
           for suite in "${suites[@]}"; do
             echo "::group::${suite}"

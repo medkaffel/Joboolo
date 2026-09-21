@@ -242,7 +242,12 @@ class AnonymousTalentPageService:
         page_size = _validate_page_size(page_size)
         cursor = _validate_cursor(cursor)
 
-        initial_state = await self.repository.get_projection_state(stream_id)
+        try:
+            initial_state = await self.repository.get_projection_state(stream_id)
+        except Exception:
+            raise AnonymousTalentPageUnavailableError(
+                "anonymous talent page unavailable"
+            ) from None
         if initial_state is None:
             raise AnonymousTalentPageUnavailableError("anonymous talent page unavailable")
 
@@ -273,16 +278,16 @@ class AnonymousTalentPageService:
         except Exception:
             raise AnonymousTalentPageUnavailableError("anonymous talent page unavailable") from None
 
-        expected_scope = _scope_key(StreamCandidate(
-            stream_id=initial_state.stream_id,
-            generation_id=generation_id,
-            stream_version=initial_state.stream_version,
-            requirement_version=initial_state.requirement_version,
-            role_dna_id=initial_state.role_dna_id,
-            role_dna_version=initial_state.role_dna_version,
-            opportunity_spec_id=initial_state.opportunity_spec_id,
-            opportunity_spec_version=initial_state.opportunity_spec_version,
-        ))
+        expected_scope = (
+            initial_state.stream_id,
+            generation_id,
+            initial_state.stream_version,
+            initial_state.requirement_version,
+            initial_state.role_dna_id,
+            initial_state.role_dna_version,
+            initial_state.opportunity_spec_id,
+            initial_state.opportunity_spec_version,
+        )
 
         has_next = len(candidates) > page_size
         page_candidates = candidates[:page_size]
@@ -302,7 +307,12 @@ class AnonymousTalentPageService:
             card = render_anonymous_talent_card(facts)
             cards.append(card)
 
-        final_state = await self.repository.get_projection_state(stream_id)
+        try:
+            final_state = await self.repository.get_projection_state(stream_id)
+        except Exception:
+            raise AnonymousTalentPageUnavailableError(
+                "anonymous talent page unavailable"
+            ) from None
         if final_state is None:
             raise AnonymousTalentPageUnavailableError("anonymous talent page unavailable")
         if final_state.state_version != initial_state.state_version:
