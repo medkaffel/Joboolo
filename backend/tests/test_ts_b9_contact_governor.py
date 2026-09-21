@@ -713,8 +713,40 @@ class TestIdentityAndLedgerBoundary:
             "activity timestamp is immutable",
             "actor scope plus idempotency key",
             "independent request fingerprint",
+            "caller-owned ``evaluated_at``",
+            "never reads a wall clock",
+            "timezone-aware, whole-millisecond contract",
+            "only before its lease expiry; equality is expired",
+            "same contact request is idempotent even after the former lease expires",
+            "different contact request conflicts",
+            "Released entries cannot be consumed",
+            "already released entry is idempotent",
+            "consumed entries cannot be released",
+            "session remains opaque",
+            "caller-owned transaction",
         ):
             assert required in contract
+
+    def test_ledger_lifecycle_signatures_are_explicit_and_session_is_opaque(self):
+        consume = inspect.signature(ContactGovernorReservationLedger.consume)
+        assert list(consume.parameters) == [
+            "self",
+            "reservation_id",
+            "contact_request_id",
+            "evaluated_at",
+            "session",
+        ]
+        assert consume.parameters["evaluated_at"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert consume.parameters["evaluated_at"].annotation == "datetime"
+        assert consume.parameters["session"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert consume.parameters["session"].default is None
+        assert consume.parameters["session"].annotation is inspect.Parameter.empty
+
+        release = inspect.signature(ContactGovernorReservationLedger.release)
+        assert list(release.parameters) == ["self", "reservation_id", "session"]
+        assert release.parameters["session"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert release.parameters["session"].default is None
+        assert release.parameters["session"].annotation is inspect.Parameter.empty
 
     def test_reservation_identity_uses_actor_scope_and_idempotency_key_only(self):
         base = request()

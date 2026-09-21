@@ -546,10 +546,34 @@ class ContactGovernorReservationLedger(Protocol):
     do not count. The activity timestamp is immutable from reservation creation.
     Reservation identity is actor scope plus idempotency key; the independent
     request fingerprint must reject reuse of that scoped key for a different
-    request.
+    request. ``consume`` uses only its caller-owned ``evaluated_at`` and never
+    reads a wall clock. That time must satisfy the governor's timezone-aware,
+    whole-millisecond contract. A reserved entry may be consumed only before
+    its lease expiry; equality is expired. Re-consuming with the same contact
+    request is idempotent even after the former lease expires, while a different
+    contact request conflicts. Released entries cannot be consumed. Releasing
+    an already released entry is idempotent, and consumed entries cannot be
+    released. A supplied session remains opaque to this core contract and must
+    participate in its caller-owned transaction.
     """
 
     async def reserve(
         self,
         command: GovernorReservationCommand,
     ) -> GovernorReservationResult: ...
+
+    async def consume(
+        self,
+        reservation_id: str,
+        contact_request_id: str,
+        *,
+        evaluated_at: datetime,
+        session=None,
+    ) -> None: ...
+
+    async def release(
+        self,
+        reservation_id: str,
+        *,
+        session=None,
+    ) -> None: ...
