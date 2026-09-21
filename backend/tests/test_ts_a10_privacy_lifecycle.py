@@ -444,5 +444,12 @@ def test_migration_is_explicit_non_ttl_no_backfill_and_has_unique_command_protec
 def test_only_authorized_a10_files_exist_in_privacy_context_and_no_existing_a9_file_was_rewritten():
     root = Path(__file__).parents[1]
     privacy_files = sorted(p.name for p in (root / "domains" / "privacy").glob("*.py"))
-    assert privacy_files == ["__init__.py", "engine.py", "models.py", "repository.py", "service.py"]
+    assert privacy_files == [
+        "__init__.py",
+        "anonymous_talent.py",
+        "engine.py",
+        "models.py",
+        "repository.py",
+        "service.py",
+    ]
     assert (root / "domains" / "permissions" / "service.py").exists()
