@@ -430,7 +430,7 @@ async def test_frequency_scope_and_half_open_boundaries(
 
 
 @pytest.mark.asyncio
-async def test_window_upper_bound_excludes_equal_evaluated_at(database):
+async def test_same_timestamp_committed_activity_counts_for_frequency(database):
     repository = await ready(database)
     configured = policy(
         frequency=FrequencyCapPolicy(
@@ -456,7 +456,7 @@ async def test_window_upper_bound_excludes_equal_evaluated_at(database):
     result = await repository.reserve(
         command(request_value=request(key="new"), policy_value=configured)
     )
-    assert result.outcome is GovernorReservationOutcome.RESERVED
+    assert result.outcome is GovernorReservationOutcome.FREQUENCY_CAP_REACHED
 
 
 @pytest.mark.asyncio
@@ -724,6 +724,102 @@ async def test_concurrent_same_identity_and_candidate_limit_are_serialized(datab
         {"_id": "candidate-1"}
     )
     assert guard["revision"] == 16
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dimension,blocked_outcome",
+    [
+        ("frequency", GovernorReservationOutcome.FREQUENCY_CAP_REACHED),
+        ("duplicate", GovernorReservationOutcome.DUPLICATE),
+        ("cooling", GovernorReservationOutcome.COMPANY_COOLING_ACTIVE),
+    ],
+)
+async def test_same_timestamp_concurrency_admits_only_one_without_active_limit(
+    database, dimension, blocked_outcome
+):
+    repository = await ready(database)
+    overrides = {}
+    if dimension == "frequency":
+        overrides["frequency"] = FrequencyCapPolicy(
+            enabled=True,
+            caps=(
+                GovernorFrequencyCap(
+                    GovernorFrequencyScope.CANDIDATE_GLOBAL,
+                    1,
+                    timedelta(hours=1),
+                ),
+            ),
+        )
+    elif dimension == "duplicate":
+        overrides["duplicate"] = DuplicateProtectionPolicy(
+            enabled=True,
+            scope=GovernorDuplicateScope.STREAM_CANDIDATE_RECRUITER,
+            window=timedelta(hours=1),
+        )
+    else:
+        overrides["cooling"] = CompanyCoolingPolicy(
+            enabled=True,
+            scope=GovernorCompanyCoolingScope.HIRING_COMPANY_CANDIDATE,
+            period=timedelta(hours=1),
+        )
+    configured = policy(**overrides)
+    assert not configured.active_reservation_limit_policy.enabled
+    attempts = [
+        command(
+            at=NOW,
+            request_value=request(key=f"{dimension}-{index}"),
+            policy_value=configured,
+        )
+        for index in range(8)
+    ]
+    results = await asyncio.gather(*(repository.reserve(item) for item in attempts))
+    assert sum(
+        result.outcome is GovernorReservationOutcome.RESERVED for result in results
+    ) == 1
+    assert sum(result.outcome is blocked_outcome for result in results) == 7
+    assert await database.db.contact_governor_reservations.count_documents({}) == 1
+
+
+@pytest.mark.asyncio
+async def test_guard_time_regression_fails_closed_without_mutation(database):
+    repository = await ready(database)
+    initial = command(request_value=request(key="initial"))
+    assert (await repository.reserve(initial)).outcome is GovernorReservationOutcome.RESERVED
+    before = guard_from_document(
+        await database.db.contact_governor_candidate_guards.find_one(
+            {"_id": "candidate-1"}
+        )
+    )
+
+    backdated = command(
+        at=NOW - timedelta(milliseconds=1),
+        request_value=request(key="backdated"),
+    )
+    with pytest.raises(ContactGovernorRepositoryError) as raised:
+        await repository.reserve(backdated)
+    assert str(raised.value) == "contact governor repository unavailable"
+    after = guard_from_document(
+        await database.db.contact_governor_candidate_guards.find_one(
+            {"_id": "candidate-1"}
+        )
+    )
+    assert after == before
+    assert await database.db.contact_governor_reservations.count_documents({}) == 1
+
+    valid = command(
+        at=NOW + timedelta(milliseconds=1),
+        request_value=request(key="valid"),
+    )
+    assert (await repository.reserve(valid)).outcome is GovernorReservationOutcome.RESERVED
+    advanced = guard_from_document(
+        await database.db.contact_governor_candidate_guards.find_one(
+            {"_id": "candidate-1"}
+        )
+    )
+    assert advanced.revision == before.revision + 1
+    assert advanced.updated_at == NOW + timedelta(milliseconds=1)
+    assert await database.db.contact_governor_reservations.count_documents({}) == 2
 
 
 @pytest.mark.asyncio

@@ -181,11 +181,13 @@ class ContactGovernorRepository:
         )
         if existing is not None:
             try:
-                guard_from_document(existing)
+                current_guard = guard_from_document(existing)
             except (ValueError, TypeError, KeyError, OverflowError):
                 raise ContactGovernorRepositoryError(
                     "contact governor candidate guard is malformed"
                 ) from None
+            if current_guard.updated_at > evaluated_at:
+                raise ContactGovernorRepositoryError(_UNAVAILABLE)
         document = await self.guards.find_one_and_update(
             {"_id": record.candidate_id},
             {
@@ -253,7 +255,7 @@ class ContactGovernorRepository:
     def _activity_in_window(cls, record, evaluated_at, window):
         return (
             cls._counts_as_activity(record, evaluated_at)
-            and evaluated_at - window <= record.activity_at < evaluated_at
+            and evaluated_at - window <= record.activity_at <= evaluated_at
         )
 
     @staticmethod
@@ -316,7 +318,7 @@ class ContactGovernorRepository:
             if any(
                 same_company(record)
                 and cls._counts_as_activity(record, evaluated_at)
-                and evaluated_at - cooling.period < record.activity_at < evaluated_at
+                and evaluated_at - cooling.period < record.activity_at <= evaluated_at
                 for record in activity
             ):
                 return GovernorReservationOutcome.COMPANY_COOLING_ACTIVE
