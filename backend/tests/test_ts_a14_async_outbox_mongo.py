@@ -140,6 +140,53 @@ async def test_publication_identity_conflicts(database, collision):
 
 
 @pytest.mark.asyncio
+async def test_strict_read_publication_returns_original_envelope_without_mutation(database):
+    repo = await ready(database)
+    original = envelope(retry_policy=RetryPolicy(3, 2, 60))
+    await repo.publish(original)
+    before = await stored(database.db)
+    result = await repo.read_publication("job1", "fixture", "key1")
+    assert result.envelope == original
+    assert result.envelope.retry_policy == RetryPolicy(3, 2, 60)
+    assert result.envelope.retry_policy != RetryPolicy(5, 4, 120)
+    assert await stored(database.db) == before
+
+
+@pytest.mark.asyncio
+async def test_strict_read_publication_uses_caller_session(database):
+    repo = await ready(database)
+    await repo.publish(envelope())
+    async with await database.client.start_session() as session:
+        result = await repo.read_publication(
+            "job1",
+            "fixture",
+            "key1",
+            session=session,
+        )
+    assert result.envelope == envelope()
+
+
+@pytest.mark.asyncio
+async def test_strict_read_publication_rejects_cross_identity_and_malformed(database):
+    repo = await ready(database)
+    await repo.publish(envelope())
+    await repo.publish(envelope(job_id="job2", idempotency_key="key2"))
+    before = await stored(database.db)
+    with pytest.raises(OutboxConflictError, match="outbox identity collision"):
+        await repo.read_publication("job1", "fixture", "key2")
+    assert await stored(database.db) == before
+
+    await database.db.async_outbox.update_one(
+        {"_id": "job1"},
+        {"$set": {"unexpected_sensitive_field": "forbidden"}},
+    )
+    malformed = await stored(database.db)
+    with pytest.raises(OutboxConflictError, match="invalid stored publication"):
+        await repo.read_publication("job1", "fixture", "key1")
+    assert await stored(database.db) == malformed
+
+
+@pytest.mark.asyncio
 async def test_concurrent_claim_one_current_owner_and_one_increment(database):
     repo = await ready(database)
     await repo.publish(envelope())
