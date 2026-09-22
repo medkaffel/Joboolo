@@ -1007,3 +1007,113 @@ async def test_malformed_runtime_document_fails_closed_and_redacts(database):
     with pytest.raises(ContactGovernorRepositoryError) as raised:
         await repository.reserve(command())
     assert "candidate-secret" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_contact_request_binding_read_hit_miss_and_consumed(database):
+    repository = await ready(database)
+    reserved_command = command(request_value=request(key="binding-reserved"))
+    consumed_command = command(request_value=request(key="binding-consumed"))
+    await repository.reserve(reserved_command)
+    await repository.reserve(consumed_command)
+    await repository.consume(
+        consumed_command.reservation_id,
+        "ts-b10-request-v1-" + "a" * 64,
+        evaluated_at=NOW + timedelta(milliseconds=1),
+    )
+
+    async with await database.client.start_session() as session:
+        session.start_transaction()
+        reserved = await repository.read_contact_request_binding(
+            reserved_command.reservation_id,
+            session=session,
+        )
+        consumed = await repository.read_contact_request_binding(
+            consumed_command.reservation_id,
+            session=session,
+        )
+        missing = await repository.read_contact_request_binding(
+            derive_reservation_id(request(key="binding-missing")),
+            session=session,
+        )
+        await session.abort_transaction()
+
+    assert reserved == reservation_record_from_command(reserved_command)
+    assert consumed.status is GovernorReservationState.CONSUMED
+    assert consumed.contact_request_id == "ts-b10-request-v1-" + "a" * 64
+    assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_contact_request_binding_read_requires_active_caller_transaction(database):
+    repository = await ready(database)
+    reservation_id = derive_reservation_id(request(key="binding-session"))
+    before = await documents(database.db, "contact_governor_reservations")
+    for session in (None, SimpleNamespace(in_transaction=False)):
+        with pytest.raises(
+            ContactGovernorRepositoryError,
+            match="active caller transaction required",
+        ):
+            await repository.read_contact_request_binding(
+                reservation_id,
+                session=session,
+            )
+    assert await documents(database.db, "contact_governor_reservations") == before
+
+
+@pytest.mark.asyncio
+async def test_contact_request_binding_read_rejects_noncanonical_reservation_id(database):
+    repository = await ready(database)
+    before = await documents(database.db, "contact_governor_reservations")
+    async with await database.client.start_session() as session:
+        session.start_transaction()
+        with pytest.raises(
+            ContactGovernorRepositoryError,
+            match="contact governor binding identity invalid",
+        ):
+            await repository.read_contact_request_binding(
+                "not-a-canonical-reservation-id",
+                session=session,
+            )
+        await session.abort_transaction()
+    assert await documents(database.db, "contact_governor_reservations") == before
+
+
+@pytest.mark.asyncio
+async def test_contact_request_binding_read_requires_b9_readiness(database):
+    repository = ContactGovernorRepository(database.db)
+    before = await database.db.list_collection_names()
+    async with await database.client.start_session() as session:
+        session.start_transaction()
+        with pytest.raises(ContactGovernorReadinessError):
+            await repository.read_contact_request_binding(
+                derive_reservation_id(request(key="binding-not-ready")),
+                session=session,
+            )
+        await session.abort_transaction()
+    assert await database.db.list_collection_names() == before == []
+
+
+@pytest.mark.asyncio
+async def test_contact_request_binding_read_malformed_is_redacted_and_read_only(database):
+    repository = await ready(database)
+    reservation_id = derive_reservation_id(request(key="binding-malformed"))
+    await database.db.contact_governor_reservations.insert_one(
+        {
+            "_id": reservation_id,
+            "candidate_id": "candidate-1",
+            "secret": "candidate-secret@example.test",
+        }
+    )
+    before = await documents(database.db, "contact_governor_reservations")
+    async with await database.client.start_session() as session:
+        session.start_transaction()
+        with pytest.raises(ContactGovernorRepositoryError) as raised:
+            await repository.read_contact_request_binding(
+                reservation_id,
+                session=session,
+            )
+        await session.abort_transaction()
+    assert str(raised.value) == "contact governor reservation is malformed"
+    assert "candidate-secret" not in str(raised.value)
+    assert await documents(database.db, "contact_governor_reservations") == before

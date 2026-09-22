@@ -129,6 +129,55 @@ class OutboxRepository:
         # Operational state may advance between reads; envelope must not.
         return records[-1]
 
+    async def read_publication(
+        self,
+        job_id,
+        job_type,
+        idempotency_key,
+        *,
+        session=None,
+    ):
+        """Strict read-only lookup reconciling both publication identities."""
+        try:
+            job_id = opaque_token(job_id)
+            job_type = opaque_token(job_type)
+            idempotency_key = opaque_token(idempotency_key)
+        except (TypeError, ValueError):
+            raise OutboxConflictError("invalid publication identity") from None
+        await self.readiness()
+        try:
+            by_id = await self.collection.find_one(
+                {"_id": job_id},
+                collation={"locale": "simple"},
+                session=session,
+            )
+            by_key = await self.collection.find_one(
+                {"job_type": job_type, "idempotency_key": idempotency_key},
+                collation={"locale": "simple"},
+                session=session,
+            )
+        except Exception:
+            raise OutboxStoredRecordError("outbox publication unavailable") from None
+        if by_id is None or by_key is None or by_id.get("_id") != by_key.get("_id"):
+            raise OutboxConflictError("outbox identity collision")
+        try:
+            records = (_decode(by_id), _decode(by_key))
+            envelopes = tuple(
+                envelope_to_document(record.envelope) for record in records
+            )
+            if envelopes[0] != envelopes[1]:
+                raise OutboxConflictError("outbox envelope conflict")
+            envelope = records[-1].envelope
+            if (
+                envelope.job_id != job_id
+                or envelope.job_type != job_type
+                or envelope.idempotency_key != idempotency_key
+            ):
+                raise OutboxConflictError("outbox identity collision")
+        except OutboxStoredRecordError:
+            raise OutboxConflictError("invalid stored publication") from None
+        return records[-1]
+
     async def claim(self, lease_owner, *, lease_seconds):
         opaque_token(lease_owner)
         bounded_int(lease_seconds, 1, 3600)

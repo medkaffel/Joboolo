@@ -170,6 +170,59 @@ async def test_publication_collision_fails_closed(collision):
 
 
 @pytest.mark.asyncio
+async def test_strict_read_publication_reconciles_identities_and_uses_session():
+    db = Database()
+    doc = record_to_document(record(JobState.COMPLETED))
+    db.find_one.side_effect = [doc, deepcopy(doc)]
+    session = SimpleNamespace(in_transaction=True)
+    result = await OutboxRepository(db).read_publication(
+        "job1",
+        "example",
+        "key1",
+        session=session,
+    )
+    assert result == record(JobState.COMPLETED)
+    assert db.find_one.await_args_list[0].args[0] == {"_id": "job1"}
+    assert db.find_one.await_args_list[1].args[0] == {
+        "job_type": "example",
+        "idempotency_key": "key1",
+    }
+    assert all(call.kwargs["session"] is session for call in db.find_one.await_args_list)
+    db.insert_one.assert_not_awaited()
+    db.find_one_and_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collision", ["missing_id", "missing_key", "crossed", "different", "malformed"])
+async def test_strict_read_publication_fails_closed(collision):
+    db = Database()
+    first, second = record_to_document(record()), record_to_document(record())
+    if collision == "missing_id":
+        first = None
+    elif collision == "missing_key":
+        second = None
+    elif collision == "crossed":
+        second["_id"] = "job2"
+    elif collision == "different":
+        second["retry_policy"]["max_attempts"] = 4
+    else:
+        second["extra"] = "forbidden"
+    db.find_one.side_effect = [first, second]
+    with pytest.raises(OutboxConflictError):
+        await OutboxRepository(db).read_publication("job1", "example", "key1")
+    db.insert_one.assert_not_awaited()
+    db.find_one_and_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_strict_read_publication_rejects_invalid_identity_before_read():
+    db = Database()
+    with pytest.raises(OutboxConflictError, match="invalid publication identity"):
+        await OutboxRepository(db).read_publication("bad id", "example", "key1")
+    db.find_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_claim_single_atomic_call_server_clock_and_fresh_tokens():
     db = Database()
     db.find_one_and_update.return_value = record_to_document(record(JobState.LEASED))

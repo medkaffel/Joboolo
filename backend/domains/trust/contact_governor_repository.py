@@ -8,6 +8,7 @@ driver-retried Mongo transaction serialized by the candidate guard document.
 from __future__ import annotations
 
 from datetime import datetime
+import re
 
 from pymongo import ReadPreference, ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
@@ -47,6 +48,7 @@ _SIMPLE = {"locale": "simple"}
 _UNAVAILABLE = "contact governor repository unavailable"
 _NOT_READY = "contact governor storage is not ready"
 _CONFLICT = "contact governor reservation conflict"
+_RESERVATION_ID = re.compile(r"^ts-b9-reservation-v1:[0-9a-f]{64}$")
 
 
 class ContactGovernorRepositoryError(RuntimeError):
@@ -227,6 +229,30 @@ class ContactGovernorRepository:
             raise ContactGovernorRepositoryError(
                 "contact governor reservation is malformed"
             ) from None
+
+    async def read_contact_request_binding(self, reservation_id: str, *, session):
+        """Strict internal B10 read in an active caller-owned transaction."""
+        try:
+            if (
+                type(reservation_id) is not str
+                or _RESERVATION_ID.fullmatch(reservation_id) is None
+            ):
+                raise ValueError("invalid reservation identifier")
+        except (ValueError, TypeError):
+            raise ContactGovernorRepositoryError(
+                "contact governor binding identity invalid"
+            ) from None
+        if session is None or getattr(session, "in_transaction", False) is not True:
+            raise ContactGovernorRepositoryError(
+                "active caller transaction required"
+            ) from None
+        await self.readiness()
+        try:
+            return await self._find_reservation(reservation_id, session=session)
+        except ContactGovernorRepositoryError:
+            raise
+        except Exception:
+            raise ContactGovernorRepositoryError(_UNAVAILABLE) from None
 
     async def _read_candidate_activity(self, candidate_id, session):
         cursor = self.reservations.find(
