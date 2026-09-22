@@ -97,38 +97,53 @@ def contact_request_to_document(request: ContactRequest) -> dict:
 
     if type(request) is not ContactRequest:
         raise ValueError("request must be ContactRequest")
-    actor = request.recruiting_actor
-    document = {
-        "_id": str(request.contact_request_id),
-        "schema_version": str(request.schema_version),
-        "version": request.version,
-        "state": request.state.value,
-        "command_fingerprint": request.command_fingerprint,
-        "idempotency_key": str(request.idempotency_key),
-        "reservation_id": request.reservation_id,
-        "governor_request_fingerprint": request.governor_request_fingerprint,
-        "governor_policy_version": request.governor_policy_version,
-        "anonymous_card_ref": request.anonymous_card_ref,
-        "candidate_id": str(request.candidate_id),
-        "stream_id": str(request.stream_id),
-        "generation_id": request.generation_id,
-        "projection_state_version": request.projection_state_version,
-        "stream_version": request.stream_version,
-        "requirement_version": request.requirement_version,
-        "role_dna_id": str(request.role_dna_id),
-        "role_dna_version": request.role_dna_version,
-        "opportunity_spec_id": str(request.opportunity_spec_id),
-        "opportunity_spec_version": request.opportunity_spec_version,
-        "recruiter_user_id": str(actor.recruiter_user_id),
-        "requesting_organization_id": str(actor.requesting_organization_id),
-        "hiring_company_id": str(actor.hiring_company_id),
-        "reservation_activity_at": request.reservation_activity_at,
-        "reservation_expires_at": request.reservation_expires_at,
-        "created_at": request.created_at,
-        "handoff_job_id": request.handoff_job_id,
-    }
-    if actor.mandate_id is not None:
-        document["mandate_id"] = str(actor.mandate_id)
+    try:
+        activity_at = require_governor_time(
+            request.reservation_activity_at,
+            "reservation_activity_at",
+        )
+        expires_at = require_governor_time(
+            request.reservation_expires_at,
+            "reservation_expires_at",
+        )
+        created_at = require_governor_time(request.created_at, "created_at")
+        actor = request.recruiting_actor
+        document = {
+            "_id": str(request.contact_request_id),
+            "schema_version": str(request.schema_version),
+            "version": request.version,
+            "state": request.state.value,
+            "command_fingerprint": request.command_fingerprint,
+            "idempotency_key": str(request.idempotency_key),
+            "reservation_id": request.reservation_id,
+            "governor_request_fingerprint": request.governor_request_fingerprint,
+            "governor_policy_version": request.governor_policy_version,
+            "anonymous_card_ref": request.anonymous_card_ref,
+            "candidate_id": str(request.candidate_id),
+            "stream_id": str(request.stream_id),
+            "generation_id": request.generation_id,
+            "projection_state_version": request.projection_state_version,
+            "stream_version": request.stream_version,
+            "requirement_version": request.requirement_version,
+            "role_dna_id": str(request.role_dna_id),
+            "role_dna_version": request.role_dna_version,
+            "opportunity_spec_id": str(request.opportunity_spec_id),
+            "opportunity_spec_version": request.opportunity_spec_version,
+            "recruiter_user_id": str(actor.recruiter_user_id),
+            "requesting_organization_id": str(actor.requesting_organization_id),
+            "hiring_company_id": str(actor.hiring_company_id),
+            "reservation_activity_at": activity_at,
+            "reservation_expires_at": expires_at,
+            "created_at": created_at,
+            "handoff_job_id": request.handoff_job_id,
+        }
+        if actor.mandate_id is not None:
+            document["mandate_id"] = str(actor.mandate_id)
+        reconstructed = contact_request_from_document(document)
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
+        raise ValueError("request must be a valid ContactRequest") from None
+    if reconstructed != request:
+        raise ValueError("request must be a valid ContactRequest")
     return document
 
 

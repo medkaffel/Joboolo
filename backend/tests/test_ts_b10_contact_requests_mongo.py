@@ -211,6 +211,36 @@ def test_strict_bson_roundtrip_and_naive_utc_boundary():
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("contact_request_id", "ts-b10-request-v1-" + "0" * 64),
+        ("command_fingerprint", "ts-b10-command-v1:" + "0" * 64),
+        ("state", "created"),
+        ("reservation_activity_at", NOW.replace(tzinfo=None)),
+        ("reservation_expires_at", (NOW + timedelta(minutes=5)).replace(tzinfo=None)),
+        ("created_at", (NOW + timedelta(milliseconds=1)).replace(tzinfo=None)),
+        ("created_at", NOW + timedelta(microseconds=1)),
+    ],
+)
+def test_serializer_rejects_corrupted_frozen_aggregate(field, value):
+    request = aggregate()
+    object.__setattr__(request, field, value)
+    with pytest.raises(ValueError, match="request must be a valid ContactRequest"):
+        contact_request_to_document(request)
+
+
+def test_serializer_rejects_corrupted_nested_actor():
+    request = aggregate()
+    object.__setattr__(
+        request.recruiting_actor,
+        "recruiter_user_id",
+        RecruiterUserId("different-recruiter"),
+    )
+    with pytest.raises(ValueError, match="request must be a valid ContactRequest"):
+        contact_request_to_document(request)
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         lambda document: document.update(extra="candidate-secret@example.test"),
