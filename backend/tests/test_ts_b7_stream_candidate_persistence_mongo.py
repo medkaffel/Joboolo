@@ -274,6 +274,24 @@ class _InterceptCollection:
         return result
 
 
+class _ExactCandidateReadCollection:
+    """Prove the narrow B9 read uses one find_one and never a fallback scan."""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+        self.queries = []
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    async def find_one(self, query, *args, **kwargs):
+        self.queries.append((query, kwargs))
+        return await self._wrapped.find_one(query, *args, **kwargs)
+
+    def find(self, *args, **kwargs):
+        raise AssertionError("get_generation_candidate must not use a scan")
+
+
 @pytest.mark.asyncio
 async def test_1_migration_preflight_without_apply_is_immutable(b7_db):
     result = await preflight(b7_db)
@@ -707,6 +725,88 @@ async def test_15_staging_exact_retry_is_idempotent(b7_db):
             {"_id": candidate_document_id("stream-1", "generation-1", "candidate-0")}
         ).to_list(length=1)
     ]
+
+
+@pytest.mark.asyncio
+async def test_15b_exact_generation_candidate_hit_miss_and_wrong_generation(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    projected = _candidate_set("stream-1", "generation-1", 1)[0]
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates([projected])
+    before = await _bundle(b7_db)
+
+    exact_reads = _ExactCandidateReadCollection(repository.candidates)
+    repository.candidates = exact_reads
+    assert await repository.get_generation_candidate(
+        "stream-1", "generation-1", "candidate-0"
+    ) == projected
+    assert await repository.get_generation_candidate(
+        "stream-1", "generation-1", "candidate-missing"
+    ) is None
+    assert await repository.get_generation_candidate(
+        "stream-1", "generation-other", "candidate-0"
+    ) is None
+    assert [query for query, _ in exact_reads.queries] == [
+        {
+            "stream_id": "stream-1",
+            "generation_id": "generation-1",
+            "candidate_id": "candidate-0",
+        },
+        {
+            "stream_id": "stream-1",
+            "generation_id": "generation-1",
+            "candidate_id": "candidate-missing",
+        },
+        {
+            "stream_id": "stream-1",
+            "generation_id": "generation-other",
+            "candidate_id": "candidate-0",
+        },
+    ]
+    assert all(
+        kwargs["collation"] == {"locale": "simple"}
+        for _, kwargs in exact_reads.queries
+    )
+    assert await _bundle(b7_db) == before
+
+
+@pytest.mark.asyncio
+async def test_15c_exact_generation_candidate_malformed_document_is_redacted(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    projected = _candidate_set("stream-1", "generation-1", 1)[0]
+    await _begin(repository, stream_id="stream-1", generation_id="generation-1")
+    await repository.stage_candidates([projected])
+    await b7_db["talent_stream_candidates"].update_one(
+        {"_id": candidate_document_id("stream-1", "generation-1", "candidate-0")},
+        {"$unset": {"computed_at": ""}},
+    )
+
+    with pytest.raises(StreamCandidateRepositoryError) as exc:
+        await repository.get_generation_candidate(
+            "stream-1", "generation-1", "candidate-0"
+        )
+    assert str(exc.value) == "b7 generation candidate is malformed"
+    assert exc.value.__cause__ is None
+    assert "candidate-0" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_15d_exact_generation_candidate_checks_readiness_before_read(b7_db):
+    await _migrate_b7_ready(b7_db)
+    repository = StreamCandidateRepository(b7_db)
+    exact_reads = _ExactCandidateReadCollection(repository.candidates)
+    repository.candidates = exact_reads
+    await b7_db["talent_stream_candidates"].drop_index(
+        "ts_b7_stream_generation_candidate_unique"
+    )
+
+    with pytest.raises(StreamCandidateReadinessError):
+        await repository.get_generation_candidate(
+            "stream-1", "generation-1", "candidate-0"
+        )
+    assert exact_reads.queries == []
 
 
 @pytest.mark.asyncio

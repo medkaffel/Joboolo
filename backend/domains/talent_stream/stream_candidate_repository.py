@@ -147,6 +147,40 @@ class StreamCandidateRepository:
         await self.readiness()
         return await self._read_state(stream_id)
 
+    async def get_generation_candidate(self, stream_id, generation_id, candidate_id):
+        """Read one exact candidate from one generation without a fallback scan."""
+        await self.readiness()
+        try:
+            document = await self.candidates.find_one(
+                {
+                    "stream_id": stream_id,
+                    "generation_id": generation_id,
+                    "candidate_id": candidate_id,
+                },
+                collation={"locale": "simple"},
+            )
+        except PyMongoError:
+            raise StreamCandidateRepositoryError(
+                "b7 generation candidate read failed"
+            ) from None
+        if document is None:
+            return None
+        try:
+            candidate = stream_candidate_from_document(document)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            raise StreamCandidateRepositoryError(
+                "b7 generation candidate is malformed"
+            ) from None
+        if (
+            candidate.stream_id != stream_id
+            or candidate.generation_id != generation_id
+            or candidate.candidate_id != candidate_id
+        ):
+            raise StreamCandidateRepositoryError(
+                "b7 generation candidate is malformed"
+            )
+        return candidate
+
     async def _read_generation_documents(self, stream_id, generation_id):
         try:
             cursor = self.candidates.find(

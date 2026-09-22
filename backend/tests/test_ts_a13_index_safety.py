@@ -145,7 +145,7 @@ def test_missing_performance_index_is_nonfatal():
 def test_empty_and_conforming_snapshots_remain_unchanged():
     empty = {}
     report = safety.verify_metadata(TS_INDEX_REQUIREMENTS, empty, empty)
-    assert not report.ok and len(report.diagnostics) == 17
+    assert not report.ok and len(report.diagnostics) == 19
     assert empty == {}
     collections, indexes = snapshots()
     original = deepcopy((collections, indexes))
@@ -228,7 +228,7 @@ def test_manifest_matches_shipped_migration_declarations_without_importing_them(
             assert not index.sparse and not index.hidden and index.expire_after_seconds is None
             assert (collection.name, index.name) not in manifest
             manifest[collection.name, index.name] = (index.keys, options)
-    assert len(TS_INDEX_REQUIREMENTS) == 17 and len(manifest) == 35
+    assert len(TS_INDEX_REQUIREMENTS) == 19 and len(manifest) == 40
     assert manifest == shipped
     assert ("recruiter_verifications", "ts_a8_recruiter_verification_state") in manifest
     b1 = next(item for item in TS_INDEX_REQUIREMENTS if item.name == "talent_streams")
@@ -282,7 +282,7 @@ def test_b7_generations_native_identity_only():
     assert requirement.indexes == ()
 
 
-def test_b7_manifest_counts_and_ttl_policy():
+def test_b7_and_b9_manifest_counts_and_ttl_policy():
     b7 = (
         _b7("talent_stream_candidates"),
         _b7("talent_stream_candidate_projection_states"),
@@ -290,8 +290,51 @@ def test_b7_manifest_counts_and_ttl_policy():
     )
     assert len(b7) == 3
     assert all(item.ordinary and item.forbid_ttl and item.simple_collation for item in b7)
-    assert sum(1 for item in TS_INDEX_REQUIREMENTS) == 17
-    assert sum(len(item.indexes) for item in TS_INDEX_REQUIREMENTS) == 35
+    assert sum(1 for item in TS_INDEX_REQUIREMENTS) == 19
+    assert sum(len(item.indexes) for item in TS_INDEX_REQUIREMENTS) == 40
+
+
+def test_b9_contact_governor_index_contracts():
+    reservations = _b7("contact_governor_reservations")
+    guards = _b7("contact_governor_candidate_guards")
+    assert reservations.simple_collation and reservations.forbid_extra_indexes
+    assert guards.simple_collation and guards.forbid_extra_indexes
+    assert guards.indexes == ()
+    assert [index.name for index in reservations.indexes] == [
+        "ts_b9_candidate_activity",
+        "ts_b9_requesting_org_activity",
+        "ts_b9_hiring_company_activity",
+        "ts_b9_dedup_activity",
+        "ts_b9_contact_request_unique",
+    ]
+    assert [index.keys for index in reservations.indexes] == [
+        (("candidate_id", 1), ("status", 1), ("activity_at", 1)),
+        (
+            ("candidate_id", 1),
+            ("requesting_organization_id", 1),
+            ("status", 1),
+            ("activity_at", 1),
+        ),
+        (
+            ("candidate_id", 1),
+            ("hiring_company_id", 1),
+            ("status", 1),
+            ("activity_at", 1),
+        ),
+        (
+            ("candidate_id", 1),
+            ("dedup_key", 1),
+            ("status", 1),
+            ("activity_at", 1),
+        ),
+        (("contact_request_id", 1),),
+    ]
+    contact_request = reservations.indexes[-1]
+    assert contact_request.unique and contact_request.critical
+    assert contact_request.partial_filter == {
+        "contact_request_id": {"$type": "string"}
+    }
+    assert all(index.expire_after_seconds is None for index in reservations.indexes)
 
 
 def test_b7_intent_job_event_scan_contract():

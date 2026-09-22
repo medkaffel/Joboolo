@@ -1,6 +1,6 @@
 """Shipped A1-B7 metadata contracts, owned by Talent Stream.
 
-17 authoritative collections, 35 secondary indexes. Unique identities/version
+19 authoritative collections, 40 secondary indexes. Unique identities/version
 constraints are correctness-critical; lookup indexes are performance-only.
 All index provisioning remains explicit-migration-only. No derived collections,
 legacy startup indexes, or A14 storage is included. A5/A6/A12 add none.
@@ -111,6 +111,56 @@ TALENT_INTENT_EVENTS_REQUIREMENT = CollectionRequirement(
 )
 
 
+CONTACT_GOVERNOR_RESERVATIONS_REQUIREMENT = CollectionRequirement(
+    "contact_governor_reservations",
+    (
+        _index(
+            "ts_b9_candidate_activity",
+            "candidate_id",
+            "status",
+            "activity_at",
+        ),
+        _index(
+            "ts_b9_requesting_org_activity",
+            "candidate_id",
+            "requesting_organization_id",
+            "status",
+            "activity_at",
+        ),
+        _index(
+            "ts_b9_hiring_company_activity",
+            "candidate_id",
+            "hiring_company_id",
+            "status",
+            "activity_at",
+        ),
+        _index(
+            "ts_b9_dedup_activity",
+            "candidate_id",
+            "dedup_key",
+            "status",
+            "activity_at",
+        ),
+        _index(
+            "ts_b9_contact_request_unique",
+            "contact_request_id",
+            unique=True,
+            strings=("contact_request_id",),
+        ),
+    ),
+    simple_collation=True,
+    forbid_extra_indexes=True,
+)
+
+
+CONTACT_GOVERNOR_CANDIDATE_GUARDS_REQUIREMENT = CollectionRequirement(
+    "contact_governor_candidate_guards",
+    (),
+    simple_collation=True,
+    forbid_extra_indexes=True,
+)
+
+
 TS_INDEX_REQUIREMENTS = (
     # migrate_ts_a1_candidate_profiles.py
     CollectionRequirement("candidate_profiles", (
@@ -183,4 +233,7 @@ TS_INDEX_REQUIREMENTS = (
     TALENT_STREAM_CANDIDATES_REQUIREMENT,
     TALENT_STREAM_CANDIDATE_PROJECTION_STATES_REQUIREMENT,
     TALENT_STREAM_CANDIDATE_GENERATIONS_REQUIREMENT,
+    # migrate_ts_b9_contact_governor.py
+    CONTACT_GOVERNOR_RESERVATIONS_REQUIREMENT,
+    CONTACT_GOVERNOR_CANDIDATE_GUARDS_REQUIREMENT,
 )
