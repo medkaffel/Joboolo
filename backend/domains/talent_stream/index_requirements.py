@@ -1,6 +1,6 @@
-"""Shipped A1-B7 metadata contracts, owned by Talent Stream.
+"""Shipped A1-B10 metadata contracts, owned by Talent Stream.
 
-19 authoritative collections, 40 secondary indexes. Unique identities/version
+20 authoritative collections, 41 secondary indexes. Unique identities/version
 constraints are correctness-critical; lookup indexes are performance-only.
 All index provisioning remains explicit-migration-only. No derived collections,
 legacy startup indexes, or A14 storage is included. A5/A6/A12 add none.
@@ -161,6 +161,20 @@ CONTACT_GOVERNOR_CANDIDATE_GUARDS_REQUIREMENT = CollectionRequirement(
 )
 
 
+TALENT_STREAM_CONTACT_REQUESTS_REQUIREMENT = CollectionRequirement(
+    "talent_stream_contact_requests",
+    (
+        _index(
+            "ts_b10_contact_request_reservation_unique",
+            "reservation_id",
+            unique=True,
+        ),
+    ),
+    simple_collation=True,
+    forbid_extra_indexes=True,
+)
+
+
 TS_INDEX_REQUIREMENTS = (
     # migrate_ts_a1_candidate_profiles.py
     CollectionRequirement("candidate_profiles", (
@@ -236,4 +250,6 @@ TS_INDEX_REQUIREMENTS = (
     # migrate_ts_b9_contact_governor.py
     CONTACT_GOVERNOR_RESERVATIONS_REQUIREMENT,
     CONTACT_GOVERNOR_CANDIDATE_GUARDS_REQUIREMENT,
+    # migrate_ts_b10_contact_requests.py
+    TALENT_STREAM_CONTACT_REQUESTS_REQUIREMENT,
 )
